@@ -2,8 +2,10 @@
 Polymarket Oracle & Settlement Price API Client.
 """
 
+import asyncio
 import logging
-from typing import Dict, Any, Optional
+from typing import Any
+
 import requests
 
 try:
@@ -12,6 +14,7 @@ except (ImportError, ValueError):
     from src.config import PRICE_API_URL
 
 logger = logging.getLogger(__name__)
+
 
 class OracleClient:
     """
@@ -22,10 +25,7 @@ class OracleClient:
     def __init__(self, api_url: str = PRICE_API_URL):
         self.api_url = api_url
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
-        })
+        self.session.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
 
     def fetch_settlement_price(
         self,
@@ -33,17 +33,22 @@ class OracleClient:
         end_time: int,
         symbol: str = "BTC",
         window: str = "5m",
-        timeout: float = 10.0
-    ) -> Optional[Dict[str, Any]]:
+        timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
         """
         Fetches open price (Price to Beat) and settlement close price for a market slot.
         """
         variant = "fiveminute" if window == "5m" else "fifteen"
+        # The reference engine and current Polymarket clients use Unix
+        # milliseconds for these query parameters. Accept seconds at our API
+        # boundary to keep slot helpers ergonomic, then normalize once here.
+        start_ms = start_time * 1000 if start_time < 10_000_000_000 else start_time
+        end_ms = end_time * 1000 if end_time < 10_000_000_000 else end_time
         params = {
             "symbol": symbol.upper(),
             "variant": variant,
-            "eventStartTime": str(start_time),
-            "endDate": str(end_time)
+            "eventStartTime": str(start_ms),
+            "endDate": str(end_ms),
         }
 
         try:
@@ -56,7 +61,7 @@ class OracleClient:
 
                 winner = None
                 if completed and open_price is not None and close_price is not None:
-                    winner = "UP" if close_price >= open_price else "DOWN"
+                    winner = "UP" if close_price > open_price else "DOWN"
 
                 return {
                     "start_time": start_time,
@@ -65,7 +70,7 @@ class OracleClient:
                     "open_price": open_price,
                     "close_price": close_price,
                     "completed": completed,
-                    "winner": winner
+                    "winner": winner,
                 }
             else:
                 logger.warning(f"Oracle price API returned HTTP {resp.status_code}")
@@ -73,3 +78,21 @@ class OracleClient:
         except Exception as e:
             logger.error(f"Error querying settlement price ({start_time}-{end_time}): {e}")
             return None
+
+    async def fetch_settlement_price_async(
+        self,
+        start_time: int,
+        end_time: int,
+        symbol: str = "BTC",
+        window: str = "5m",
+        request_timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
+        """Non-blocking wrapper for use inside the async engine."""
+        return await asyncio.to_thread(
+            self.fetch_settlement_price,
+            start_time,
+            end_time,
+            symbol,
+            window,
+            request_timeout,
+        )

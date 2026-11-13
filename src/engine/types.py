@@ -2,23 +2,24 @@
 Data structures, enums, and types for the Polymarket Execution Engine.
 """
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Callable, Coroutine, Dict, List, Optional, Any, Set
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
 
 
-class OrderAction(str, Enum):
+class OrderAction(StrEnum):
     BUY = "buy"
     SELL = "sell"
 
 
-class OrderType(str, Enum):
+class OrderType(StrEnum):
     GTC = "GTC"  # Good-Till-Cancelled (Maker)
     FOK = "FOK"  # Fill-or-Kill (Taker)
 
 
-class LifecycleState(str, Enum):
+class LifecycleState(StrEnum):
     INIT = "INIT"
     RUNNING = "RUNNING"
     STOPPING = "STOPPING"
@@ -65,9 +66,9 @@ class OrderRequest:
     shares: float
     order_type: OrderType = OrderType.GTC
     expire_at_ms: float = 0.0
-    on_filled: Optional[Callable[[float], Any]] = None
-    on_expired: Optional[Callable[[], Any]] = None
-    on_failed: Optional[Callable[[str], Any]] = None
+    on_filled: Callable[[float], Any] | None = None
+    on_expired: Callable[[], Any] | None = None
+    on_failed: Callable[[str], Any] | None = None
 
 
 @dataclass
@@ -80,11 +81,11 @@ class PendingOrder:
     expire_at_ms: float
     placed_at_ms: float = field(default_factory=lambda: time.time() * 1000)
     order_type: OrderType = OrderType.GTC
-    on_filled: Optional[Callable[[float], Any]] = None
-    on_expired: Optional[Callable[[], Any]] = None
-    on_failed: Optional[Callable[[str], Any]] = None
+    on_filled: Callable[[float], Any] | None = None
+    on_expired: Callable[[], Any] | None = None
+    on_failed: Callable[[str], Any] | None = None
 
-    def to_snapshot(self) -> Dict[str, Any]:
+    def to_snapshot(self) -> dict[str, Any]:
         """Serializable representation without callables."""
         return {
             "order_id": self.order_id,
@@ -94,13 +95,15 @@ class PendingOrder:
             "shares": self.shares,
             "expire_at_ms": self.expire_at_ms,
             "placed_at_ms": self.placed_at_ms,
-            "order_type": self.order_type.value if isinstance(self.order_type, OrderType) else self.order_type
+            "order_type": self.order_type.value
+            if isinstance(self.order_type, OrderType)
+            else self.order_type,
         }
 
 
 @dataclass
 class BookSnapshot:
-    best_ask: Optional[float] = None
-    best_ask_liquidity: Optional[float] = None
-    best_bid: Optional[float] = None
-    best_bid_liquidity: Optional[float] = None
+    best_ask: float | None = None
+    best_ask_liquidity: float | None = None
+    best_bid: float | None = None
+    best_bid_liquidity: float | None = None

@@ -1,246 +1,260 @@
-"""
-Top-level Trading Engine Orchestrator.
-Coordinates market lifecycle progression, session PnL accounting,
-risk management circuit-breakers, and state persistence.
-"""
+"""Top-level orchestrator for rolling Polymarket markets."""
+
+from __future__ import annotations
 
 import asyncio
 import logging
-import signal
-import sys
+import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Any
+from typing import Any
 
-from .types import LifecycleState
-from .client import BaseTradingClient, SimTradingClient, ProdTradingClient
-from .wallet import WalletTracker
-from .market_lifecycle import MarketLifecycle
-from .strategies import STRATEGIES, DEFAULT_STRATEGY
-from .state import load_state, save_state
-from ..collectors.binance_client import BinanceTickerTracker
-from ..utils.slot import get_market_slug
+from ..collectors.price_tracker import PriceTracker
 from ..config import (
     DEFAULT_ASSET,
     DEFAULT_WINDOW,
-    PROJECT_ROOT
+    PROJECT_ROOT,
+    SIM_DELAY_MS,
+    validate_market,
 )
+from ..utils.slot import get_market_slug
+from .client import BaseTradingClient, ProdTradingClient, SimTradingClient
+from .market_lifecycle import MarketLifecycle
+from .state import load_state, save_state
+from .strategies import DEFAULT_STRATEGY, STRATEGIES
+from .types import BookSnapshot, LifecycleState
+from .wallet import WalletTracker
 
 logger = logging.getLogger("TradingEngine")
 
 
 class TradingEngine:
-    """
-    Main engine driving multi-slot automated trading across Polymarket prediction rounds.
-    """
-
     def __init__(
         self,
         strategy_name: str = DEFAULT_STRATEGY,
         slot_offset: int = 1,
         prod: bool = False,
-        rounds: Optional[int] = None,
+        rounds: int | None = None,
         asset: str = DEFAULT_ASSET,
         window: str = DEFAULT_WINDOW,
         wallet_balance: float = 50.0,
         max_session_loss: float = 3.0,
         always_log: bool = False,
-        state_dir: Optional[Path] = None
-    ):
-        self.strategy_name = strategy_name
-        self.strategy_fn = STRATEGIES.get(strategy_name)
-        if not self.strategy_fn:
-            raise ValueError(f"Unknown strategy: '{strategy_name}'. Available: {list(STRATEGIES.keys())}")
+        state_dir: Path | None = None,
+    ) -> None:
+        strategy = STRATEGIES.get(strategy_name)
+        if strategy is None:
+            raise ValueError(
+                f"Unknown strategy {strategy_name!r}; choose from {sorted(STRATEGIES)}"
+            )
+        asset = asset.lower()
+        window = window.lower()
+        validate_market(asset, window)
+        if slot_offset < 0:
+            raise ValueError("slot_offset must be zero or greater")
+        if prod and strategy_name in {"late-entry", "simulation"}:
+            raise ValueError(
+                f"{strategy_name!r} is intentionally paper-only; add and review a "
+                "dedicated live strategy before enabling production orders"
+            )
 
+        self.strategy_name = strategy_name
+        self.strategy_fn = strategy
         self.slot_offset = slot_offset
         self.prod = prod
-        self.rounds = rounds
-        self.asset = asset.lower()
-        self.window = window.lower()
+        self.rounds = None if rounds is None or rounds <= 0 else rounds
+        self.asset = asset
+        self.window = window
         self.max_session_loss = float(max_session_loss)
         self.always_log = always_log
 
-        # State paths
-        self.state_dir = Path(state_dir or (PROJECT_ROOT / "state"))
+        self.state_dir = Path(state_dir or PROJECT_ROOT / "state")
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.state_dir / ("engine_prod.json" if prod else "engine_sim.json")
 
-        # Session tracking
         self.session_pnl = 0.0
         self.session_loss = 0.0
         self.rounds_created = 0
         self.is_running = True
         self.shutting_down = False
         self._last_save_time = 0.0
+        self._lifecycles: dict[str, MarketLifecycle] = {}
+        self._completed_slugs: set[str] = set()
+        self._completed_markets: list[dict[str, Any]] = []
 
-        # Lifecycles
-        self._lifecycles: Dict[str, MarketLifecycle] = {}
-        self._completed_slugs: Set[str] = set()
-        self._completed_markets: List[Dict[str, Any]] = []
-
-        # Shared Ticker & Wallet
-        self.ticker = BinanceTickerTracker(symbol=self.asset)
-        self.wallet = WalletTracker(initial_balance=wallet_balance, log_fn=logger.info)
-
-        # Trading Client
+        self.ticker = PriceTracker(symbol=self.asset)
+        self.wallet = WalletTracker(wallet_balance, log_fn=logger.info)
         if prod:
-            self.client: BaseTradingClient = ProdTradingClient(private_key="")
+            self.client: BaseTradingClient = ProdTradingClient(
+                private_key=os.getenv("POLYMARKET_PRIVATE_KEY", ""),
+                funder_address=os.getenv("POLYMARKET_DEPOSIT_WALLET", ""),
+            )
         else:
-            self.client = SimTradingClient(book_provider=self._get_book_for_token)
-
-    def _get_book_for_token(self, token_id: str):
-        """Dispatches book snapshot lookup across active market lifecycles."""
-        for lc in self._lifecycles.values():
-            snap = lc.get_book_snapshot(token_id)
-            if snap and (snap.best_ask is not None or snap.best_bid is not None):
-                return snap
-        return SimTradingClient(lambda t: None)._orders.get(token_id)
-
-    async def start(self):
-        """Starts ticker, initializes state, and begins engine main loop."""
-        logger.info("=" * 70)
-        logger.info("Starting Automated Trading Engine")
-        logger.info(f"Strategy: {self.strategy_name.upper()} | Mode: {'PROD (Real Funds)' if self.prod else 'SIMULATION (Paper Trading)'}")
-        logger.info(f"Asset: {self.asset.upper()} | Timeframe: {self.window} | Slot Offset: +{self.slot_offset}")
-        logger.info(f"Wallet Balance: ${self.wallet.balance:.2f} | Max Loss Limit: -${self.max_session_loss:.2f}")
-        logger.info(f"Rounds: {'Unlimited' if self.rounds is None else self.rounds}")
-        logger.info("=" * 70)
-
-        # Start Binance Ticker in background
-        ticker_stop = asyncio.Event()
-        ticker_task = asyncio.create_task(self.ticker.stream_ticker(ticker_stop))
-
-        # Wait for initial ticker update
-        for _ in range(20):
-            if self.ticker.is_ready:
-                logger.info(f"[Startup] Reference Ticker Ready: ${self.ticker.current_price:,.2f}")
-                break
-            await asyncio.sleep(0.2)
-
-        await self.client.init()
-
-        # Load persisted session state if available
-        saved = load_state(self.state_file)
-        if saved:
-            self.session_pnl = saved.get("session_pnl", 0.0)
-            self.session_loss = saved.get("session_loss", 0.0)
-            self._completed_markets = saved.get("completed_markets", [])
-            logger.info(f"[Startup] Loaded state from {self.state_file} (Prior PnL: ${self.session_pnl:+.2f})")
-
-        # Main Engine Loop
-        try:
-            while self.is_running:
-                await self._engine_tick()
-                await asyncio.sleep(0.1)  # 100ms engine cycle
-        except asyncio.CancelledError:
-            pass
-        finally:
-            ticker_stop.set()
-            try:
-                await asyncio.wait_for(ticker_task, timeout=2.0)
-            except Exception:
-                pass
-            self._persist_state()
-            logger.info(
-                f"[Engine] Stopped. Final Session PnL: {'+' if self.session_pnl >= 0 else ''}${self.session_pnl:.2f} "
-                f"across {len(self._completed_markets)} round(s)."
+            self.client = SimTradingClient(
+                book_provider=self._get_book_for_token,
+                sim_delay_ms=SIM_DELAY_MS,
             )
 
-    async def _engine_tick(self):
-        """Core engine tick: manages lifecycle creation, state steps, and session PnL."""
-        now = time.time()
-        rounds_exhausted = (self.rounds is not None and self.rounds_created >= self.rounds)
+    def _get_book_for_token(self, token_id: str) -> BookSnapshot:
+        for lifecycle in self._lifecycles.values():
+            snapshot = lifecycle.get_book_snapshot(token_id)
+            if snapshot.best_ask is not None or snapshot.best_bid is not None:
+                return snapshot
+        return BookSnapshot()
 
-        # 1. Discover and instantiate new upcoming market slot
-        if not self.shutting_down and not rounds_exhausted:
-            slug = get_market_slug(asset=self.asset, window=self.window, offset=self.slot_offset)
+    async def start(self) -> None:
+        logger.info(
+            "Starting engine | strategy=%s mode=%s asset=%s window=%s rounds=%s",
+            self.strategy_name,
+            "production" if self.prod else "simulation",
+            self.asset.upper(),
+            self.window,
+            self.rounds if self.rounds is not None else "unlimited",
+        )
+        ticker_stop = asyncio.Event()
+        ticker_task = asyncio.create_task(self.ticker.stream(ticker_stop), name="reference-prices")
+
+        try:
+            await self.client.init()
+            self._restore_state()
+            ready = await self.ticker.wait_for_ready(ticker_stop, timeout_seconds=30.0)
+            if not ready:
+                logger.warning(
+                    "Price feeds are not all ready; late-entry stays fail-closed "
+                    "until Binance and Coinbase are both current"
+                )
+
+            while self.is_running:
+                await self._engine_tick()
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            ticker_stop.set()
+            for lifecycle in self._lifecycles.values():
+                await lifecycle.destroy()
+            self._lifecycles.clear()
+            ticker_task.cancel()
+            await asyncio.gather(ticker_task, return_exceptions=True)
+            await self.client.close()
+            self._persist_state()
+            logger.info(
+                "Engine stopped | session PnL=%+.2f rounds=%d",
+                self.session_pnl,
+                len(self._completed_markets),
+            )
+
+    def _restore_state(self) -> None:
+        saved = load_state(self.state_file)
+        if not saved:
+            return
+        self.session_pnl = float(saved.get("session_pnl", 0.0))
+        self.session_loss = float(saved.get("session_loss", 0.0))
+        self._completed_markets = list(saved.get("completed_markets", []))
+        self._completed_slugs = {
+            str(row["slug"])
+            for row in self._completed_markets
+            if isinstance(row, dict) and row.get("slug")
+        }
+        wallet = saved.get("wallet")
+        if isinstance(wallet, dict):
+            self.wallet.restore_snapshot(wallet)
+        if saved.get("active_markets"):
+            logger.warning(
+                "Saved active markets require exchange reconciliation and are not "
+                "automatically replayed; wallet reservations remain persisted"
+            )
+        logger.info("Restored engine state from %s", self.state_file)
+
+    async def _engine_tick(self) -> None:
+        now = time.time()
+        exhausted = self.rounds is not None and self.rounds_created >= self.rounds
+
+        if not self.shutting_down and not exhausted:
+            slug = get_market_slug(self.asset, self.window, self.slot_offset)
             if slug not in self._lifecycles and slug not in self._completed_slugs:
-                logger.info(f"[Engine] Creating new MarketLifecycle for slot: {slug}")
-                lifecycle = MarketLifecycle(
+                self._lifecycles[slug] = MarketLifecycle(
                     slug=slug,
                     client=self.client,
                     wallet=self.wallet,
-                    binance_tracker=self.ticker,
+                    price_tracker=self.ticker,
                     strategy_name=self.strategy_name,
                     strategy_fn=self.strategy_fn,
-                    log_fn=logger.info
+                    log_fn=logger.info,
                 )
-                self._lifecycles[slug] = lifecycle
                 self.rounds_created += 1
+                logger.info("Created lifecycle %s", slug)
 
-        # 2. Advance all active lifecycles
-        done_slugs = []
-        for slug, lc in list(self._lifecycles.items()):
-            await lc.tick()
-            if lc.state == LifecycleState.DONE:
-                done_slugs.append(slug)
+        done: list[str] = []
+        for slug, lifecycle in tuple(self._lifecycles.items()):
+            await lifecycle.tick()
+            if lifecycle.state is LifecycleState.DONE:
+                done.append(slug)
 
-        # 3. Handle completed lifecycles
-        for slug in done_slugs:
-            lc = self._lifecycles.pop(slug)
-            self.session_pnl = round(self.session_pnl + lc.pnl, 4)
-            if lc.pnl < 0:
-                self.session_loss = round(self.session_loss + lc.pnl, 4)
-
-            logger.info(
-                f"[{slug}] Round Complete! PnL: {lc.pnl:+.2f} | "
-                f"Total Session PnL: {'+' if self.session_pnl >= 0 else ''}${self.session_pnl:.2f}"
+        for slug in done:
+            lifecycle = self._lifecycles.pop(slug)
+            self.session_pnl = round(self.session_pnl + lifecycle.pnl, 4)
+            if lifecycle.pnl < 0:
+                self.session_loss = round(self.session_loss + lifecycle.pnl, 4)
+            self._completed_markets.append(
+                {
+                    "slug": slug,
+                    "strategy": lifecycle.strategy_name,
+                    "pnl": lifecycle.pnl,
+                    "orders_count": len(lifecycle.order_history),
+                }
             )
-            self._completed_markets.append({
-                "slug": slug,
-                "strategy": lc.strategy_name,
-                "pnl": lc.pnl,
-                "orders_count": len(lc.order_history)
-            })
             self._completed_slugs.add(slug)
+            logger.info("Round %s complete | PnL=%+.2f", slug, lifecycle.pnl)
 
-            # Check risk circuit-breaker
             if abs(self.session_loss) >= self.max_session_loss:
-                logger.warning(
-                    f"[CircuitBreaker] Session loss limit reached (-${abs(self.session_loss):.2f} >= -${self.max_session_loss:.2f}). "
-                    f"Initiating graceful auto-shutdown."
-                )
-                self.shutdown("MAX_SESSION_LOSS limit reached")
+                self.shutdown("session loss limit reached")
 
-        # 4. Periodic state persistence (every 5 seconds)
         if now - self._last_save_time >= 5.0:
             self._persist_state()
             self._last_save_time = now
 
-        # 5. Check if all rounds completed
-        if not self.shutting_down and rounds_exhausted and len(self._lifecycles) == 0:
-            logger.info(f"[Engine] All {self.rounds} target round(s) complete. Shutting down.")
-            self.shutdown("Rounds target reached")
-
-        # 6. Exit when all settled during shutdown
-        if self.shutting_down and len(self._lifecycles) == 0:
+        if not self.shutting_down and exhausted and not self._lifecycles:
+            self.shutdown("round target reached")
+        if self.shutting_down and not self._lifecycles:
             self.is_running = False
 
-    def shutdown(self, reason: str = "Signal received"):
-        """Gracefully halts the engine, cancelling buys and settling positions."""
+    def shutdown(self, reason: str = "shutdown requested") -> None:
         if self.shutting_down:
             return
-        logger.info(f"[Shutdown] {reason}. Cancelling active placements and draining markets...")
+        logger.info("Shutdown: %s", reason)
         self.shutting_down = True
-        for lc in self._lifecycles.values():
-            if lc.state == LifecycleState.RUNNING:
-                lc.state = LifecycleState.STOPPING
+        for lifecycle in self._lifecycles.values():
+            lifecycle.shutdown()
 
-    def _persist_state(self):
-        """Writes current session metrics to disk."""
+    def _persist_state(self) -> None:
         active = [
             {
-                "slug": lc.slug,
-                "state": lc.state.value,
-                "pending_orders": [o.to_snapshot() for o in lc.pending_orders],
-                "unfilled_shares": sum(self.wallet.total_shares(t) for t in lc.clob_token_ids)
+                "slug": lifecycle.slug,
+                "state": lifecycle.state.value,
+                "pending_orders": [order.to_snapshot() for order in lifecycle.pending_orders],
+                "order_history": [
+                    {
+                        "action": order.action.value,
+                        "price": order.price,
+                        "shares": order.shares,
+                        "fee": order.fee,
+                        "token_id": order.token_id,
+                    }
+                    for order in lifecycle.order_history
+                ],
+                "condition_id": lifecycle.condition_id,
+                "clob_token_ids": lifecycle.clob_token_ids,
             }
-            for lc in self._lifecycles.values()
+            for lifecycle in self._lifecycles.values()
         ]
-        data = {
-            "session_pnl": self.session_pnl,
-            "session_loss": self.session_loss,
-            "active_markets": active,
-            "completed_markets": self._completed_markets
-        }
-        save_state(self.state_file, data)
+        save_state(
+            self.state_file,
+            {
+                "session_pnl": self.session_pnl,
+                "session_loss": self.session_loss,
+                "wallet": self.wallet.to_snapshot(),
+                "active_markets": active,
+                "completed_markets": self._completed_markets,
+            },
+        )

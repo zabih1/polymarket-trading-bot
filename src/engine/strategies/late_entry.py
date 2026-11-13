@@ -7,12 +7,13 @@ Protected by dynamic stop-loss suppression at 0.48.
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional, Dict, Any
+from typing import Any
 
-from .base import StrategyContext
-from ..types import OrderRequest, OrderAction, OrderType
 from ..indicators import Indicators
+from ..types import OrderAction, OrderRequest, OrderType
+from .base import StrategyContext
 
 SHARES_PER_TRADE = 6.0
 STOP_LOSS_PRICE = 0.48
@@ -30,7 +31,7 @@ class Position:
 class LateEntryState:
     def __init__(self):
         self.has_entered = False
-        self.position: Optional[Position] = None
+        self.position: Position | None = None
         self.stop_loss_fired = False
 
 
@@ -38,25 +39,29 @@ def check_entry_signal(
     remaining: float,
     btc_price: float,
     price_to_beat: float,
-    up_info: Optional[Dict[str, float]],
-    down_info: Optional[Dict[str, float]],
-    atr: Optional[float],
-    gap_safety: Optional[float],
-    divergence: Optional[float],
-    peak_gap_ratio: Optional[float]
-) -> Optional[Dict[str, Any]]:
+    up_info: dict[str, float] | None,
+    down_info: dict[str, float] | None,
+    atr: float | None,
+    gap_safety: float | None,
+    divergence: float | None,
+    peak_gap_ratio: float | None,
+) -> dict[str, Any] | None:
     """Evaluates strict entry filters."""
     if remaining < 5.0:
         return None
 
-    div = divergence if divergence is not None else 0.0
+    # Missing cross-venue data is a failed safety check, never zero divergence.
+    div = divergence if divergence is not None else float("inf")
 
     if (
-        remaining <= 90.0 and
-        atr is not None and atr <= 2.0 and
-        gap_safety is not None and gap_safety >= 40.0 and
-        div <= 10.0 and
-        peak_gap_ratio is not None and peak_gap_ratio >= 0.75
+        remaining <= 90.0
+        and atr is not None
+        and atr <= 2.0
+        and gap_safety is not None
+        and gap_safety >= 40.0
+        and div <= 10.0
+        and peak_gap_ratio is not None
+        and peak_gap_ratio >= 0.75
     ):
         up_certain = up_info is not None and up_info["price"] > 0.85
         down_certain = down_info is not None and down_info["price"] > 0.85
@@ -72,16 +77,19 @@ def check_entry_signal(
                     "ask": info["price"],
                     "gap": gap,
                     "liquidity": info["liquidity"],
-                    "stop_loss_price": STOP_LOSS_PRICE
+                    "stop_loss_price": STOP_LOSS_PRICE,
                 }
 
     return None
 
 
-async def late_entry_strategy(ctx: StrategyContext) -> Optional[Callable[[], None]]:
+async def late_entry_strategy(ctx: StrategyContext) -> Callable[[], None] | None:
     """
     Late-Entry Event-Driven Strategy implementation.
     """
+    if ctx.is_production:
+        raise RuntimeError("late-entry is simulation-only, matching the reference engine")
+
     ctx.log(f"[{ctx.slug}] [LateEntry] Registered and holding lifecycle lock.")
     release_lock = ctx.hold()
 
@@ -128,7 +136,7 @@ async def late_entry_strategy(ctx: StrategyContext) -> Optional[Callable[[], Non
                         atr=indicators.atr,
                         gap_safety=indicators.gap_safety(gap),
                         divergence=ctx.ticker.divergence,
-                        peak_gap_ratio=indicators.peak_gap_ratio(gap)
+                        peak_gap_ratio=indicators.peak_gap_ratio(gap),
                     )
 
                     if signal:
@@ -142,20 +150,31 @@ async def late_entry_strategy(ctx: StrategyContext) -> Optional[Callable[[], Non
                             f"Gap: ${signal['gap']:.2f} | Liq: ${signal['liquidity']:.1f}"
                         )
 
-                        def on_filled(filled_shares: float):
+                        def on_filled(
+                            filled_shares: float,
+                            *,
+                            _side: str = side,
+                            _token_id: str = token_id,
+                            _ask: float = ask,
+                            _stop_loss: float = signal["stop_loss_price"],
+                        ) -> None:
                             state.position = Position(
-                                side=side,
-                                token_id=token_id,
-                                entry_price=ask,
+                                side=_side,
+                                token_id=_token_id,
+                                entry_price=_ask,
                                 shares=filled_shares,
-                                stop_loss_price=signal["stop_loss_price"]
+                                stop_loss_price=_stop_loss,
                             )
                             ctx.log(
-                                f"[{ctx.slug}] [LateEntry] BUY {side} Filled: {filled_shares:.2f} shares @ {ask:.3f}"
+                                f"[{ctx.slug}] [LateEntry] BUY {_side} Filled: "
+                                f"{filled_shares:.2f} shares @ {_ask:.3f}"
                             )
 
-                        def on_failed(reason: str):
-                            ctx.log(f"[{ctx.slug}] [LateEntry] BUY {side} Failed ({reason}). Resetting entry.")
+                        def on_failed(reason: str, *, _side: str = side) -> None:
+                            ctx.log(
+                                f"[{ctx.slug}] [LateEntry] BUY {_side} Failed "
+                                f"({reason}). Resetting entry."
+                            )
                             state.has_entered = False
 
                         order = OrderRequest(
@@ -167,7 +186,7 @@ async def late_entry_strategy(ctx: StrategyContext) -> Optional[Callable[[], Non
                             expire_at_ms=ctx.slot_end_ms,
                             on_filled=on_filled,
                             on_failed=on_failed,
-                            on_expired=lambda: setattr(state, 'has_entered', False)
+                            on_expired=lambda: setattr(state, "has_entered", False),
                         )
                         ctx.post_orders([order])
 
@@ -179,18 +198,13 @@ async def late_entry_strategy(ctx: StrategyContext) -> Optional[Callable[[], Non
                     best_bid = ctx.order_book.best_bid_price(pos.side)
 
                     GAP_CONFIRM_THRESHOLD = 5.0
-                    gap_confirms = (
-                        gap is not None and (
-                            (pos.side == "UP" and gap > GAP_CONFIRM_THRESHOLD) or
-                            (pos.side == "DOWN" and gap < -GAP_CONFIRM_THRESHOLD)
-                        )
+                    gap_confirms = gap is not None and (
+                        (pos.side == "UP" and gap > GAP_CONFIRM_THRESHOLD)
+                        or (pos.side == "DOWN" and gap < -GAP_CONFIRM_THRESHOLD)
                     )
                     rsi = indicators.rsi
-                    rsi_confirms = (
-                        rsi is not None and (
-                            (pos.side == "UP" and rsi >= 50.0) or
-                            (pos.side == "DOWN" and rsi <= 50.0)
-                        )
+                    rsi_confirms = rsi is not None and (
+                        (pos.side == "UP" and rsi >= 50.0) or (pos.side == "DOWN" and rsi <= 50.0)
                     )
 
                     should_sell = False
@@ -202,14 +216,24 @@ async def late_entry_strategy(ctx: StrategyContext) -> Optional[Callable[[], Non
 
                     if should_sell:
                         state.stop_loss_fired = True
-                        sell_price = round(best_bid + 0.01 if best_bid is not None else pos.stop_loss_price - 0.01, 2)
+                        state.position = None
+                        sell_price = round(
+                            best_bid + 0.01 if best_bid is not None else pos.stop_loss_price - 0.01,
+                            2,
+                        )
                         ctx.log(
                             f"[{ctx.slug}] [LateEntry] STOP-LOSS TRIGGERED: Selling {pos.side} @ {sell_price:.2f}"
                         )
 
                         def on_stop_expired():
-                            ctx.log(f"[{ctx.slug}] [LateEntry] Stop-loss limit order expired. Executing emergency sell.")
-                            sell_ids = [o.order_id for o in ctx.pending_orders if o.action == OrderAction.SELL]
+                            ctx.log(
+                                f"[{ctx.slug}] [LateEntry] Stop-loss limit order expired. Executing emergency sell."
+                            )
+                            sell_ids = [
+                                o.order_id
+                                for o in ctx.pending_orders
+                                if o.action == OrderAction.SELL
+                            ]
                             if sell_ids:
                                 asyncio.create_task(ctx.emergency_sells(sell_ids))
 
@@ -219,9 +243,11 @@ async def late_entry_strategy(ctx: StrategyContext) -> Optional[Callable[[], Non
                             price=sell_price,
                             shares=pos.shares,
                             order_type=OrderType.GTC,
-                            expire_at_ms=ctx.slot_end_ms - 5000,
-                            on_filled=lambda s: ctx.log(f"[{ctx.slug}] [LateEntry] Stop-loss SELL Filled: {s:.2f} shares"),
-                            on_expired=on_stop_expired
+                            expire_at_ms=ctx.slot_end_ms,
+                            on_filled=lambda s: ctx.log(
+                                f"[{ctx.slug}] [LateEntry] Stop-loss SELL Filled: {s:.2f} shares"
+                            ),
+                            on_expired=on_stop_expired,
                         )
                         ctx.post_orders([stop_order])
 

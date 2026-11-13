@@ -6,18 +6,18 @@ Enables crash-resilient session tracking and state replay.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def load_state(filepath: Path) -> Optional[Dict[str, Any]]:
+def load_state(filepath: Path) -> dict[str, Any] | None:
     """Loads saved engine state from JSON file."""
     path = Path(filepath)
     if not path.exists():
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
             data.setdefault("completed_markets", [])
             data.setdefault("active_markets", [])
@@ -27,7 +27,7 @@ def load_state(filepath: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def save_state(filepath: Path, state: Dict[str, Any]):
+def save_state(filepath: Path, state: dict[str, Any]):
     """Atomic write of engine state using a temporary file."""
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)

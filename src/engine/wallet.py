@@ -4,7 +4,8 @@ Tracks cash, reservations, share holdings, and settlement credits.
 """
 
 import logging
-from typing import Dict, Optional, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +16,12 @@ class WalletTracker:
     Ensures orders cannot exceed available capital or share inventory.
     """
 
-    def __init__(self, initial_balance: float = 50.0, log_fn: Optional[Callable[[str], None]] = None):
+    def __init__(self, initial_balance: float = 50.0, log_fn: Callable[[str], None] | None = None):
         self._balance = float(initial_balance)
-        self._reserved_for_buys: Dict[str, float] = {}  # order_id -> reserved_cash
-        self._shares: Dict[str, float] = {}             # token_id -> total_shares
-        self._reserved_for_sells: Dict[str, float] = {} # order_id -> reserved_shares
-        self._sell_token_map: Dict[str, str] = {}       # order_id -> token_id
+        self._reserved_for_buys: dict[str, float] = {}  # order_id -> reserved_cash
+        self._shares: dict[str, float] = {}  # token_id -> total_shares
+        self._reserved_for_sells: dict[str, float] = {}  # order_id -> reserved_shares
+        self._sell_token_map: dict[str, str] = {}  # order_id -> token_id
         self._log = log_fn or logger.debug
         self._log(f"[Wallet] Initialized with balance: ${self._balance:.2f}")
 
@@ -43,7 +44,8 @@ class WalletTracker:
         """Unreserved shares available for new sell orders."""
         total = self._shares.get(token_id, 0.0)
         reserved = sum(
-            qty for oid, qty in self._reserved_for_sells.items()
+            qty
+            for oid, qty in self._reserved_for_sells.items()
             if self._sell_token_map.get(oid) == token_id
         )
         return max(0.0, total - reserved)
@@ -62,20 +64,25 @@ class WalletTracker:
     def lock_for_buy(self, order_id: str, price: float, shares: float, label: str = ""):
         cost = price * shares
         self._reserved_for_buys[order_id] = cost
-        self._log(f"[Wallet] Lock Buy ({label}): -${cost:.2f} | Avail Cash: ${self.available_cash:.2f}")
+        self._log(
+            f"[Wallet] Lock Buy ({label}): -${cost:.2f} | Avail Cash: ${self.available_cash:.2f}"
+        )
 
     def unlock_buy(self, order_id: str, label: str = ""):
         cost = self._reserved_for_buys.pop(order_id, None)
         if cost is not None:
-            self._log(f"[Wallet] Unlock Buy ({label}): +${cost:.2f} | Avail Cash: ${self.available_cash:.2f}")
+            self._log(
+                f"[Wallet] Unlock Buy ({label}): +${cost:.2f} | Avail Cash: ${self.available_cash:.2f}"
+            )
 
     def on_buy_filled(self, order_id: str, token_id: str, price: float, filled_shares: float):
         """Deducts cash and credits purchased shares to holdings."""
-        cost = self._reserved_for_buys.pop(order_id, None)
+        reserved_cost = self._reserved_for_buys.pop(order_id, None)
         actual_cost = price * filled_shares
 
-        # Deduct actual cash spent
-        self._balance -= actual_cost
+        # A normal FOK buy can deliver fee-adjusted shares. The full reserved
+        # notional still left the wallet, matching the reference tracker.
+        self._balance -= reserved_cost if reserved_cost is not None else actual_cost
         self._shares[token_id] = self._shares.get(token_id, 0.0) + filled_shares
 
         self._log(
@@ -88,15 +95,21 @@ class WalletTracker:
     def lock_for_sell(self, order_id: str, token_id: str, shares: float, label: str = ""):
         self._reserved_for_sells[order_id] = shares
         self._sell_token_map[order_id] = token_id
-        self._log(f"[Wallet] Lock Sell ({label}): -{shares:.2f} shares | Avail Shares: {self.available_shares(token_id):.2f}")
+        self._log(
+            f"[Wallet] Lock Sell ({label}): -{shares:.2f} shares | Avail Shares: {self.available_shares(token_id):.2f}"
+        )
 
     def unlock_sell(self, order_id: str, label: str = ""):
         shares = self._reserved_for_sells.pop(order_id, None)
         tid = self._sell_token_map.pop(order_id, None)
         if shares is not None and tid is not None:
-            self._log(f"[Wallet] Unlock Sell ({label}): +{shares:.2f} shares | Avail: {self.available_shares(tid):.2f}")
+            self._log(
+                f"[Wallet] Unlock Sell ({label}): +{shares:.2f} shares | Avail: {self.available_shares(tid):.2f}"
+            )
 
-    def on_sell_filled(self, order_id: str, token_id: str, price: float, filled_shares: float, fee: float = 0.0):
+    def on_sell_filled(
+        self, order_id: str, token_id: str, price: float, filled_shares: float, fee: float = 0.0
+    ):
         """Deducts sold shares and credits net sale proceeds to cash balance."""
         self._reserved_for_sells.pop(order_id, None)
         self._sell_token_map.pop(order_id, None)
@@ -131,3 +144,27 @@ class WalletTracker:
             f"+${payout:.2f} | New Cash: ${self._balance:.2f}"
         )
         return payout
+
+    def to_snapshot(self) -> dict[str, Any]:
+        """Return serializable wallet state for safe process restart."""
+        return {
+            "balance": self._balance,
+            "reserved_for_buys": dict(self._reserved_for_buys),
+            "shares": dict(self._shares),
+            "reserved_for_sells": dict(self._reserved_for_sells),
+            "sell_token_map": dict(self._sell_token_map),
+        }
+
+    def restore_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Restore a snapshot produced by :meth:`to_snapshot`."""
+        self._balance = float(snapshot.get("balance", self._balance))
+        self._reserved_for_buys = {
+            str(key): float(value) for key, value in snapshot.get("reserved_for_buys", {}).items()
+        }
+        self._shares = {str(key): float(value) for key, value in snapshot.get("shares", {}).items()}
+        self._reserved_for_sells = {
+            str(key): float(value) for key, value in snapshot.get("reserved_for_sells", {}).items()
+        }
+        self._sell_token_map = {
+            str(key): str(value) for key, value in snapshot.get("sell_token_map", {}).items()
+        }

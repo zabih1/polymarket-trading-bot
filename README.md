@@ -1,101 +1,213 @@
-# Polymarket Trading Bot (Python)
+# Polymarket Trading Bot
 
-A Python research and trading system for **Polymarket 5-Minute and 15-Minute Crypto Binary (Up/Down) Markets** (BTC, ETH, SOL, etc.).
+A Python application for collecting Polymarket market data, executing automated
+paper-trading strategies, and validating strategy performance against historical
+captures.
 
----
+The application is designed around short-duration crypto Up/Down markets. It
+maintains synchronized order books and reference prices, applies deterministic
+execution rules, tracks wallet state, and settles positions using authoritative
+market results.
 
-## 📁 Project Architecture & Workflow
+## Features
 
-The project follows a phased step-by-step roadmap. Each step has its own dedicated Jupyter Notebook for rapid experimentation, analysis, and visualization. Later, verified logic is modularized into `src/` for live automated execution.
+- Discovers upcoming 5-minute and 15-minute Polymarket markets.
+- Maintains live UP and DOWN order books from the Polymarket CLOB.
+- Aggregates Polymarket, Binance, and Coinbase reference prices.
+- Rejects trading signals when required feeds are missing or stale.
+- Supports deterministic paper execution with realistic placement and
+  settlement delays.
+- Tracks cash, reserved funds, token positions, fills, fees, and market payouts.
+- Persists wallet state and session results across controlled restarts.
+- Collects one-second market snapshots for offline validation.
+- Validates captured data before feature calculation or backtesting.
+- Provides an event-ordered backtester using the same indicators, entry rules,
+  fill checks, stop-loss behavior, and settlement logic as the runtime engine.
+- Includes a production client adapter for the official Polymarket Python SDK.
 
+## Application Components
+
+| Component | Responsibility |
+| --- | --- |
+| Trading engine | Coordinates market lifecycles, strategies, orders, wallet state, and settlement. |
+| Market collector | Records order books, reference prices, oracle prices, and completed outcomes. |
+| Data processor | Validates capture integrity and calculates deterministic strategy features. |
+| Backtester | Replays captured events through the paper-execution and strategy rules. |
+| Production adapter | Connects reviewed live strategies to the official authenticated Polymarket client. |
+
+## Requirements
+
+- Python 3.12 or 3.13
+- Network access to Polymarket, Binance, and Coinbase
+- A funded Polygon wallet only when operating a separately reviewed live strategy
+
+The included `late-entry` and `simulation` strategies are intentionally restricted
+to paper trading.
+
+## Installation
+
+Create an isolated environment and install the application with its development
+tools:
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+Copy-Item .env.example .env
 ```
-polymarket_trading_bot/
-│
-├── notebooks/                              # Phase-by-phase interactive notebooks
-│   ├── 01_data_collection.ipynb            # [STEP 1] Live data collection pipeline
-│   ├── 02_feature_engineering.ipynb        # [STEP 2] Orderbook imbalance, spread, latency signals
-│   ├── 03_backtesting.ipynb                # [STEP 3] Fill simulation & P&L backtesting
-│   └── 04_production_engine.ipynb          # [STEP 4] Production execution & lifecycle engine
-│
-├── data/                                   # Data storage
-│   ├── raw/                                # Raw live market snapshots (CSV/JSON)
-│   └── processed/                          # Enriched datasets with engineered features
-│
-├── src/                                    # Modular Python engine (collectors, engine, utils)
-│   ├── config.py                           # System settings, endpoints & asset maps
-│   ├── continuous_collector.py             # Continuous multi-slot data collector daemon
-│   ├── collectors/                         # Dedicated collection connectors
-│   │   ├── gamma_client.py                 # Market discovery & condition/token IDs
-│   │   ├── clob_client.py                  # L2 Order book (REST + WS)
-│   │   ├── oracle_client.py                # Chainlink settlement open/close prices
-│   │   └── binance_client.py               # Live proxy reference feed
-│   ├── engine/                             # Core execution engine
-│   │   ├── runner.py                       # Top-level TradingEngine orchestrator
-│   │   ├── market_lifecycle.py             # Single-slot state machine (INIT->RUNNING->STOPPING->DONE)
-│   │   ├── wallet.py                       # Cash reservations, share tracking & settlement
-│   │   ├── client.py                       # SimTradingClient & ProdTradingClient
-│   │   ├── indicators.py                   # Real-time streaming RSI, ATR, RTV, Gap Safety
-│   │   ├── user_channel.py                 # Asynchronous fill, expiry, and failure event router
-│   │   ├── state.py                        # Crash-resilient state persistence & recovery
-│   │   ├── types.py                        # Dataclasses, orders, and lifecycle enums
-│   │   └── strategies/                     # Event-driven strategies (Late-Entry, Simulation)
-│   └── utils/                              # Helpers & timing calculators
-│       └── slot.py                         # 5m/15m rolling slot math
-│
-├── run_collector.py                        # Standalone collector launcher
-├── run_engine.py                           # Standalone production engine launcher
-├── state/                                  # Persisted session state (engine_sim.json / engine_prod.json)
-├── config/                                 # Runtime configurations
-├── docs/                                   # Reference documents & requirements
-├── .env.example                            # Sample environment variables
-└── requirements.txt                        # Python dependencies
+
+Notebook dependencies are optional:
+
+```powershell
+python -m pip install -e ".[notebooks]"
 ```
 
----
+## Configuration
 
-## 🚀 Step-by-Step Roadmap
+Runtime settings are read from `.env`. The committed `.env.example` contains safe
+defaults for paper trading.
 
-| Step | Status | Target | Description |
-| :--- | :---: | :--- | :--- |
-| **Step 1: Data Collection** | **Completed** | `notebooks/01_data_collection.ipynb` & `run_collector.py` | Captures full L2 order books (bids/asks with depth), Gamma market metadata, Chainlink baseline (`openPrice`) & settlement (`closePrice`), and Binance proxy prices. Includes continuous multi-slot collector. |
-| **Step 2: Signal & Indicator Engineering** | **Completed** | `notebooks/02_feature_engineering.ipynb` | Computes the streamlined indicator suite: Price Gap, Wilder RSI(14) on gap, Wilder ATR(14) on price, RTV(30), Gap Safety, Peak Gap Ratio, and Order Book Imbalance (OBI). |
-| **Step 3: Strategy & Backtesting** | **Completed** | `notebooks/03_backtesting.ipynb` | Simulates realistic L2 book depth fills (volume-weighted slippage) and evaluates the two primary strategy models: Late-Entry Strategy and Limit Order Simulation Strategy with full terminal settlement accounting. |
-| **Step 4: Production Engine** | **Completed** | `notebooks/04_production_engine.ipynb` & `run_engine.py` | Full event-driven async execution engine (`TradingEngine` & `MarketLifecycle`), wallet capital tracking, streaming indicators, circuit breakers (`MAX_SESSION_LOSS`), and state persistence. |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MARKET_ASSET` | `btc` | Asset used for market discovery. |
+| `MARKET_WINDOW` | `5m` | Market duration: `5m` or `15m`. |
+| `PRICE_FEEDS` | `polymarket,binance,coinbase` | Enabled public reference-price streams. |
+| `PRICE_FEED_PRIORITY` | `polymarket,binance,coinbase` | Price source selection order. |
+| `MAX_PRICE_STALENESS_SECONDS` | `2.0` | Maximum age of a price before it is unavailable. |
+| `SIM_DELAY_MS` | `150` | Base simulated API placement delay. |
+| `SIM_SETTLEMENT_DELAY_MS` | `4000` | Delay between simulated match and settlement. |
+| `BUY_MAX_RETRIES` | `30` | Maximum buy retries after balance-related rejection. |
+| `BUY_RETRY_DELAY_MS` | `500` | Delay between buy retries. |
 
----
+Production credentials are not required for collection, backtesting, or paper
+trading. If a reviewed live strategy is added, configure:
 
-## 🛠️ Quickstart
+```dotenv
+POLYMARKET_PRIVATE_KEY=0x...
+POLYMARKET_DEPOSIT_WALLET=0x...
+```
 
-### 1. Automated Production Trading Engine
-To run automated multi-slot trading with real-time order books, streaming indicators, and risk management:
+Never commit `.env`, private keys, wallet secrets, or API credentials.
 
-```bash
-# Run paper-trading simulation with the Late-Entry Strategy for 5 rounds:
-python run_engine.py --strategy late-entry --rounds 5 --slot-offset 1
+## Running the Application
 
-# Run the Limit Order Simulation Strategy with custom initial cash balance & loss limit:
+### Paper-trading engine
+
+Run the late-entry strategy for five consecutive markets:
+
+```powershell
+python run_engine.py --strategy late-entry --rounds 5
+```
+
+Run the example simulation strategy with a custom starting balance and session
+loss limit:
+
+```powershell
 python run_engine.py --strategy simulation --wallet-balance 100 --max-session-loss 5
-
-# Run indefinitely in continuous simulation (Ctrl+C gracefully exits & flushes state):
-python run_engine.py --strategy late-entry --rounds 0
-
-# Run in production mode with real funds on Polygon (requires PRIVATE_KEY):
-python run_engine.py --strategy late-entry --prod
 ```
 
-### 2. Continuous Multi-Slot Data Collection
-To collect raw Level-2 snapshots continuously in the background across consecutive slots:
+Omit `--rounds` to keep the engine running continuously. Use `Ctrl+C` to request
+a graceful shutdown; active lifecycles are allowed to cancel or settle before the
+process exits.
 
-```bash
-# Collect consecutive 5-minute BTC slots continuously
-python run_collector.py --rounds 12 --window 5m --asset btc
+### Market-data collector
 
-# Run indefinitely in the background
-python run_collector.py --rounds 0
+Collect twelve consecutive BTC five-minute markets:
+
+```powershell
+python run_collector.py --asset btc --window 5m --rounds 12
 ```
 
-### 3. Interactive Notebook Research Pipeline
-1. **[01 Data Collection](file:///D:/Companies/chaolin/Research/polymarket_trading_bot/notebooks/01_data_collection.ipynb)**: Connects to Polymarket CLOB WebSocket, Gamma API, and Binance WebSocket for single-slot inspection.
-2. **[02 Feature Engineering](file:///D:/Companies/chaolin/Research/polymarket_trading_bot/notebooks/02_feature_engineering.ipynb)**: Calculates indicators, spreads, and order book imbalances.
-3. **[03 Backtesting](file:///D:/Companies/chaolin/Research/polymarket_trading_bot/notebooks/03_backtesting.ipynb)**: Simulates order fills on full L2 depth and evaluates strategy P&L against Chainlink settlement.
-4. **[04 Production Engine](file:///D:/Companies/chaolin/Research/polymarket_trading_bot/notebooks/04_production_engine.ipynb)**: Live paper-trading execution, wallet tracking demonstration, and strategy execution state machine.
+Raw captures are written to `data/raw/`. The collector subscribes before each
+market opens and updates the capture after the completed result is available.
+
+### Data processing
+
+Validate raw captures and write enriched files to `data/processed/`:
+
+```powershell
+python run_pipeline.py
+```
+
+Custom directories can be supplied when processing external captures:
+
+```powershell
+python run_pipeline.py --raw-dir path/to/raw --output-dir path/to/processed
+```
+
+### Backtesting
+
+Run the backtester over captured markets:
+
+```powershell
+python run_backtest.py --data-dir data/raw --output data/backtest_results.csv
+```
+
+Use `--backfill-resolutions` to request authoritative historical open and close
+prices when a capture does not contain a completed result:
+
+```powershell
+python run_backtest.py --backfill-resolutions
+```
+
+The backtester reports incomplete inputs explicitly. It does not infer missing
+price-feed divergence or guess a market winner.
+
+## Data Integrity and Execution Rules
+
+- Market slugs, slot boundaries, and expected durations must agree.
+- Liquidity is measured in USDC at the single best price level.
+- A simulated order fills only when its price crosses the book and best-level
+  liquidity is strictly greater than twice the order notional.
+- GTC orders rest on the book before they can match.
+- Matched simulated orders settle four seconds later.
+- A matched order cannot be canceled while settlement is pending.
+- Oracle timestamps use Unix milliseconds, and equal open and close prices resolve
+  to DOWN.
+- Positions are paid out only after the market reports a completed result.
+
+These rules are shared by the runtime engine and the backtester to avoid different
+execution assumptions between live-book paper trading and historical validation.
+
+## Project Structure
+
+```text
+polymarket_trading_bot/
+|-- src/
+|   |-- collectors/       # Market metadata, order books, oracle, and price feeds
+|   |-- engine/           # Execution clients, lifecycle, wallet, and strategies
+|   `-- backtesting.py    # Event-ordered strategy replay
+|-- tests/                # Execution, market-data, and pipeline tests
+|-- data/
+|   |-- raw/              # Collected market snapshots
+|   `-- processed/        # Validated and enriched datasets
+|-- run_engine.py
+|-- run_collector.py
+|-- run_pipeline.py
+`-- run_backtest.py
+```
+
+## Quality Checks
+
+Run the automated test and code-quality suites before deployment:
+
+```powershell
+python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+```
+
+## Operational Safety
+
+- Paper mode is the default.
+- Built-in strategies refuse to operate in production mode.
+- Production mode requires explicit confirmation and wallet credentials.
+- Missing or stale safety feeds prevent late-entry signals.
+- The session-loss circuit breaker stops new market creation after the configured
+  loss threshold is reached.
+- Runtime state is stored locally under `state/`; credentials remain outside
+  source control.
+
+Automated trading involves financial risk. Review and test every strategy,
+credential path, and order rule before enabling real-money execution.

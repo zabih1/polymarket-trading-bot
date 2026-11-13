@@ -4,7 +4,6 @@ Implements Wilder RSI, Wilder ATR, RTV, Gap Safety, and Peak Gap Ratio.
 """
 
 import time
-from typing import List, Optional
 
 
 class RSI:
@@ -14,14 +13,14 @@ class RSI:
 
     def __init__(self, period: int = 14):
         self.period = period
-        self._prev: Optional[float] = None
-        self._avg_gain: Optional[float] = None
-        self._avg_loss: Optional[float] = None
-        self._seed_gains: List[float] = []
-        self._seed_losses: List[float] = []
-        self._value: Optional[float] = None
+        self._prev: float | None = None
+        self._avg_gain: float | None = None
+        self._avg_loss: float | None = None
+        self._seed_gains: list[float] = []
+        self._seed_losses: list[float] = []
+        self._value: float | None = None
 
-    def update(self, value: float) -> Optional[float]:
+    def update(self, value: float) -> float | None:
         if self._prev is None:
             self._prev = value
             return None
@@ -48,7 +47,7 @@ class RSI:
         return self._value
 
     @property
-    def value(self) -> Optional[float]:
+    def value(self) -> float | None:
         return self._value
 
     @staticmethod
@@ -66,12 +65,12 @@ class ATR:
 
     def __init__(self, period: int = 14):
         self.period = period
-        self._prev: Optional[float] = None
-        self._avg_tr: Optional[float] = None
-        self._seed_trs: List[float] = []
-        self._value: Optional[float] = None
+        self._prev: float | None = None
+        self._avg_tr: float | None = None
+        self._seed_trs: list[float] = []
+        self._value: float | None = None
 
-    def update(self, price: float) -> Optional[float]:
+    def update(self, price: float) -> float | None:
         if self._prev is None:
             self._prev = price
             return None
@@ -91,10 +90,10 @@ class ATR:
         return self._value
 
     @property
-    def value(self) -> Optional[float]:
+    def value(self) -> float | None:
         return self._value
 
-    def gap_safety(self, gap: float) -> Optional[float]:
+    def gap_safety(self, gap: float) -> float | None:
         if not self._value or self._value == 0:
             return None
         return abs(gap) / self._value
@@ -107,10 +106,10 @@ class RTV:
 
     def __init__(self, window: int = 30):
         self.window = window
-        self._prices: List[float] = []
-        self._value: Optional[float] = None
+        self._prices: list[float] = []
+        self._value: float | None = None
 
-    def update(self, price: float) -> Optional[float]:
+    def update(self, price: float) -> float | None:
         self._prices.append(price)
 
         if len(self._prices) > self.window + 1:
@@ -121,14 +120,13 @@ class RTV:
             return None
 
         total_abs_diff = sum(
-            abs(self._prices[i] - self._prices[i - 1])
-            for i in range(1, len(self._prices))
+            abs(self._prices[i] - self._prices[i - 1]) for i in range(1, len(self._prices))
         )
         self._value = total_abs_diff / (len(self._prices) - 1)
         return self._value
 
     @property
-    def value(self) -> Optional[float]:
+    def value(self) -> float | None:
         return self._value
 
 
@@ -144,9 +142,9 @@ class Indicators:
         self._peak_abs_gap = 0.0
         self._last_update_ms = 0.0
 
-    def tick(self, gap: Optional[float], btc_price: Optional[float]):
+    def tick(self, gap: float | None, btc_price: float | None):
         now_ms = time.time() * 1000
-        if now_ms - self._last_update_ms < 950:  # ~1s throttle
+        if now_ms - self._last_update_ms < 1000:
             return
         self._last_update_ms = now_ms
 
@@ -162,23 +160,23 @@ class Indicators:
             self._rtv.update(btc_price)
 
     @property
-    def rsi(self) -> Optional[float]:
+    def rsi(self) -> float | None:
         return self._rsi.value
 
     @property
-    def atr(self) -> Optional[float]:
+    def atr(self) -> float | None:
         return self._atr.value
 
     @property
-    def rtv(self) -> Optional[float]:
+    def rtv(self) -> float | None:
         return self._rtv.value
 
-    def peak_gap_ratio(self, gap: Optional[float]) -> Optional[float]:
+    def peak_gap_ratio(self, gap: float | None) -> float | None:
         if gap is None or self._peak_abs_gap == 0.0:
             return None
         return abs(gap) / self._peak_abs_gap
 
-    def gap_safety(self, gap: Optional[float]) -> Optional[float]:
+    def gap_safety(self, gap: float | None) -> float | None:
         if gap is None:
             return None
         return self._atr.gap_safety(gap)

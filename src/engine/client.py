@@ -1,208 +1,287 @@
-"""
-Trading client interface and implementation for simulation and live execution.
-"""
+"""Trading clients for deterministic simulation and live CLOB execution."""
+
+from __future__ import annotations
 
 import abc
 import asyncio
 import logging
 import random
 import uuid
-import time
-from typing import Dict, List, Optional, Callable, Set, Any
+from collections.abc import Callable, Sequence
+from decimal import Decimal
+from typing import Any
 
-from .types import (
-    Order,
-    OrderAction,
-    OrderType,
-    PlacedOrder,
-    BookSnapshot,
-    OrderRequest
-)
+from .types import BookSnapshot, Order, OrderAction, OrderRequest, OrderType, PlacedOrder
 
 logger = logging.getLogger(__name__)
 
 
+def _action(value: OrderAction | str) -> OrderAction:
+    return value if isinstance(value, OrderAction) else OrderAction(value.lower())
+
+
+def _order_type(value: OrderType | str) -> OrderType:
+    return value if isinstance(value, OrderType) else OrderType(value.upper())
+
+
 def is_sim_filled(
-    action: OrderAction,
+    action: OrderAction | str,
     price: float,
     shares: float,
-    book: BookSnapshot
+    book: BookSnapshot,
 ) -> bool:
+    """Apply the reference engine's strict 2x best-level liquidity rule.
+
+    Liquidity is USDC at the single best counterparty level, not total shares
+    or total depth. Equality intentionally does not fill.
     """
-    Realistic simulation fill check:
-    Price must cross and available counterparty liquidity at best price
-    must exceed (shares * price * 2) as a 2x liquidity buffer to avoid
-    filling against thin, illiquid ticks.
-    """
-    required_liquidity = shares * price * 2.0
-    if action == OrderAction.BUY or action == "buy":
+
+    required_usdc = shares * price * 2.0
+    if _action(action) is OrderAction.BUY:
         return (
-            book.best_ask is not None and
-            book.best_ask <= price and
-            (book.best_ask_liquidity or 0.0) >= required_liquidity
+            book.best_ask is not None
+            and book.best_ask <= price
+            and (book.best_ask_liquidity or 0.0) > required_usdc
         )
-    else:
-        return (
-            book.best_bid is not None and
-            book.best_bid >= price and
-            (book.best_bid_liquidity or 0.0) >= required_liquidity
-        )
+    return (
+        book.best_bid is not None
+        and book.best_bid >= price
+        and (book.best_bid_liquidity or 0.0) > required_usdc
+    )
 
 
 class BaseTradingClient(abc.ABC):
-    """Abstract trading client interface."""
+    @abc.abstractmethod
+    async def init(self) -> None:
+        """Prepare the client for use."""
 
     @abc.abstractmethod
-    async def init(self):
-        pass
+    async def post_orders(self, orders: Sequence[OrderRequest]) -> list[PlacedOrder]:
+        """Place one or more orders."""
 
     @abc.abstractmethod
-    async def post_orders(self, orders: List[OrderRequest]) -> List[PlacedOrder]:
-        pass
+    async def cancel_orders(self, order_ids: Sequence[str]) -> dict[str, Any]:
+        """Cancel orders and report IDs that did and did not cancel."""
 
     @abc.abstractmethod
-    async def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
-        pass
+    async def get_order_by_id(self, order_id: str) -> Order | None:
+        """Return the current order when it remains queryable."""
 
-    @abc.abstractmethod
-    async def get_order_by_id(self, order_id: str) -> Optional[Order]:
-        pass
+    async def close(self) -> None:
+        """Release client resources."""
+        return None
 
 
 class SimTradingClient(BaseTradingClient):
-    """
-    High-fidelity simulation client that paper-trades against live L2 order book depth.
-    Simulates ~150ms execution delay, fill-or-kill semantics, maker GTC queues,
-    and realistic counterparty liquidity depth constraints.
-    """
+    """Paper client matching the reference engine's order semantics."""
 
-    def __init__(self, book_provider: Callable[[str], BookSnapshot], sim_delay_ms: int = 150):
+    def __init__(
+        self,
+        book_provider: Callable[[str], BookSnapshot],
+        sim_delay_ms: int = 150,
+    ) -> None:
         self._book_provider = book_provider
         self._sim_delay_ms = sim_delay_ms
-        self._orders: Dict[str, Order] = {}
-        self._balance_ready_at: Dict[str, float] = {}
+        self._orders: dict[str, Order] = {}
 
-    async def init(self):
-        logger.info("[SimClient] Initialized in paper-trading simulation mode.")
+    async def init(self) -> None:
+        logger.info("[SimClient] Initialized in paper-trading mode.")
 
-    async def _simulate_delay(self):
-        """Simulates realistic network latency of 150-160ms."""
-        delay = (self._sim_delay_ms + random.uniform(0, 15)) / 1000.0
+    async def _simulate_delay(self) -> None:
+        delay = (self._sim_delay_ms + random.uniform(0.0, 10.0)) / 1000.0
         await asyncio.sleep(delay)
 
-    async def post_orders(self, orders: List[OrderRequest]) -> List[PlacedOrder]:
+    async def post_orders(self, orders: Sequence[OrderRequest]) -> list[PlacedOrder]:
         await self._simulate_delay()
-        results: List[PlacedOrder] = []
+        results: list[PlacedOrder] = []
 
-        for req in orders:
+        for request in orders:
+            action = _action(request.action)
+            order_type = _order_type(request.order_type)
             order_id = str(uuid.uuid4())
-            book = self._book_provider(req.token_id)
-            action = OrderAction(req.action) if isinstance(req.action, str) else req.action
-            order_type = OrderType(req.order_type) if isinstance(req.order_type, str) else req.order_type
 
-            # FOK: Immediate match or cancel
-            if order_type == OrderType.FOK:
-                if is_sim_filled(action, req.price, req.shares, book):
-                    order = Order(
-                        id=order_id,
-                        token_id=req.token_id,
-                        action=action,
-                        price=req.price,
-                        shares=req.shares,
-                        actual_shares=req.shares,
-                        order_type=order_type,
-                        status="filled",
-                        expire_at_ms=req.expire_at_ms
-                    )
-                    self._orders[order_id] = order
-                    results.append(PlacedOrder(order_id=order_id, status="matched", success=True))
-                else:
-                    results.append(PlacedOrder(
+            if order_type is OrderType.FOK and not is_sim_filled(
+                action,
+                request.price,
+                request.shares,
+                self._book_provider(request.token_id),
+            ):
+                results.append(
+                    PlacedOrder(
                         order_id="",
                         status="rejected",
                         success=False,
-                        error_msg="order couldn't be fully filled. FOK orders are fully filled or killed."
-                    ))
-            else:
-                # GTC: Check if immediate crossing match, otherwise rest on book as 'live'
-                if is_sim_filled(action, req.price, req.shares, book):
-                    order = Order(
-                        id=order_id,
-                        token_id=req.token_id,
-                        action=action,
-                        price=req.price,
-                        shares=req.shares,
-                        actual_shares=req.shares,
-                        order_type=order_type,
-                        status="filled",
-                        expire_at_ms=req.expire_at_ms
+                        error_msg=(
+                            "order couldn't be fully filled. FOK orders are fully filled or killed."
+                        ),
                     )
-                    self._orders[order_id] = order
-                    results.append(PlacedOrder(order_id=order_id, status="matched", success=True))
-                else:
-                    order = Order(
-                        id=order_id,
-                        token_id=req.token_id,
-                        action=action,
-                        price=req.price,
-                        shares=req.shares,
-                        actual_shares=req.shares,
-                        order_type=order_type,
-                        status="live",
-                        expire_at_ms=req.expire_at_ms
-                    )
-                    self._orders[order_id] = order
-                    results.append(PlacedOrder(order_id=order_id, status="live", success=True))
+                )
+                continue
+
+            # The reference simulator always rests GTC orders. UserChannel
+            # observes the subsequent book match and applies settlement delay.
+            status = "filled" if order_type is OrderType.FOK else "live"
+            self._orders[order_id] = Order(
+                id=order_id,
+                token_id=request.token_id,
+                action=action,
+                price=request.price,
+                shares=request.shares,
+                actual_shares=request.shares if status == "filled" else 0.0,
+                order_type=order_type,
+                status=status,
+                expire_at_ms=request.expire_at_ms,
+            )
+            results.append(
+                PlacedOrder(
+                    order_id=order_id,
+                    status="matched" if status == "filled" else "live",
+                    success=True,
+                )
+            )
 
         return results
 
-    async def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
+    async def cancel_orders(self, order_ids: Sequence[str]) -> dict[str, Any]:
         await self._simulate_delay()
-        canceled = []
-        not_canceled = {}
-
-        for oid in order_ids:
-            order = self._orders.get(oid)
-            if order and order.status == "live":
+        canceled: list[str] = []
+        not_canceled: dict[str, str] = {}
+        for order_id in order_ids:
+            order = self._orders.get(order_id)
+            if order is not None and order.status == "live":
                 order.status = "canceled"
-                canceled.append(oid)
+                canceled.append(order_id)
             else:
-                not_canceled[oid] = "Order not found or already filled"
-
+                not_canceled[order_id] = "Order not found or no longer live"
         return {"canceled": canceled, "not_canceled": not_canceled}
 
-    async def get_order_by_id(self, order_id: str) -> Optional[Order]:
+    async def get_order_by_id(self, order_id: str) -> Order | None:
         await self._simulate_delay()
-        order = self._orders.get(order_id)
-        if not order:
-            return None
-
-        # Check if resting GTC order is now filled by current market price
-        if order.status == "live":
-            book = self._book_provider(order.token_id)
-            if is_sim_filled(order.action, order.price, order.shares, book):
-                order.status = "filled"
-
-        return order
+        return self._orders.get(order_id)
 
 
 class ProdTradingClient(BaseTradingClient):
-    """
-    Production trading client for live Polymarket CLOB execution via Polygon.
+    """Live adapter for Polymarket's current unified Python SDK.
+
+    The optional SDK dependency is imported lazily so collection, simulation,
+    and backtesting continue to work without wallet packages installed.
     """
 
-    def __init__(self, private_key: str, funder_address: str = ""):
+    def __init__(self, private_key: str, funder_address: str = "") -> None:
+        if not private_key:
+            raise ValueError("POLYMARKET_PRIVATE_KEY is required when production mode is enabled")
         self.private_key = private_key
-        self.funder_address = funder_address
+        self.funder_address = funder_address or None
+        self._client: Any = None
 
-    async def init(self):
-        logger.info("[ProdClient] Initialized for live production trading on Polymarket CLOB.")
+    async def init(self) -> None:
+        try:
+            from polymarket import AsyncSecureClient
+        except ImportError as exc:  # pragma: no cover - depends on optional SDK
+            raise RuntimeError(
+                "Production mode requires the official 'polymarket-client' package"
+            ) from exc
 
-    async def post_orders(self, orders: List[OrderRequest]) -> List[PlacedOrder]:
-        raise NotImplementedError("Live production order placement requires valid API credentials and gas funding.")
+        self._client = await AsyncSecureClient.create(
+            private_key=self.private_key,
+            wallet=self.funder_address,
+            logger=logger,
+        )
+        logger.info("[ProdClient] Authenticated with the official Polymarket SDK.")
 
-    async def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
-        raise NotImplementedError("Live cancellation not configured.")
+    def _require_client(self) -> Any:
+        if self._client is None:
+            raise RuntimeError("Production client has not been initialized")
+        return self._client
 
-    async def get_order_by_id(self, order_id: str) -> Optional[Order]:
-        return None
+    @staticmethod
+    def _decimal(value: float) -> Decimal:
+        return Decimal(str(value))
+
+    async def _place_one(self, request: OrderRequest) -> PlacedOrder:
+        client = self._require_client()
+        action = _action(request.action)
+        order_type = _order_type(request.order_type)
+        side = action.value.upper()
+
+        try:
+            if order_type is OrderType.GTC:
+                response = await client.place_limit_order(
+                    token_id=request.token_id,
+                    price=self._decimal(request.price),
+                    size=self._decimal(request.shares),
+                    side=side,
+                )
+            elif action is OrderAction.BUY:
+                response = await client.place_market_order(
+                    token_id=request.token_id,
+                    side="BUY",
+                    amount=self._decimal(request.price * request.shares),
+                    max_price=self._decimal(request.price),
+                    order_type="FOK",
+                )
+            else:
+                response = await client.place_market_order(
+                    token_id=request.token_id,
+                    side="SELL",
+                    shares=self._decimal(request.shares),
+                    min_price=self._decimal(request.price),
+                    order_type="FOK",
+                )
+        except Exception as exc:
+            logger.exception("Live order placement failed")
+            return PlacedOrder("", "rejected", False, str(exc))
+
+        if not bool(getattr(response, "ok", False)):
+            code = getattr(response, "code", "unknown")
+            message = getattr(response, "message", "Order rejected")
+            return PlacedOrder("", str(code), False, str(message))
+
+        return PlacedOrder(
+            order_id=str(response.order_id),
+            status=str(response.status),
+            success=True,
+        )
+
+    async def post_orders(self, orders: Sequence[OrderRequest]) -> list[PlacedOrder]:
+        # Place independently so one rejected order does not discard siblings.
+        return list(await asyncio.gather(*(self._place_one(order) for order in orders)))
+
+    async def cancel_orders(self, order_ids: Sequence[str]) -> dict[str, Any]:
+        if not order_ids:
+            return {"canceled": [], "not_canceled": {}}
+        response = await self._require_client().cancel_orders(order_ids=list(order_ids))
+        return {
+            "canceled": list(getattr(response, "canceled", ())),
+            "not_canceled": dict(getattr(response, "not_canceled", {})),
+        }
+
+    async def subscribe_user(self, condition_id: str) -> Any:
+        """Open the official authenticated user stream for one market."""
+        from polymarket.streams import UserSpec
+
+        return await self._require_client().subscribe(UserSpec(markets=[condition_id]))
+
+    async def get_order_by_id(self, order_id: str) -> Order | None:
+        try:
+            live = await self._require_client().get_order(order_id=order_id)
+        except Exception:
+            return None
+
+        original_size = float(getattr(live, "original_size", getattr(live, "size", 0.0)))
+        size_matched = float(getattr(live, "size_matched", 0.0))
+        return Order(
+            id=str(getattr(live, "id", order_id)),
+            token_id=str(getattr(live, "asset_id", getattr(live, "token_id", ""))),
+            action=_action(str(getattr(live, "side", "BUY"))),
+            price=float(getattr(live, "price", 0.0)),
+            shares=original_size,
+            actual_shares=size_matched,
+            order_type=OrderType.GTC,
+            status="filled" if original_size > 0 and size_matched >= original_size else "live",
+        )
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+            self._client = None

@@ -1,1 +1,3 @@
-from .slot import get_slot_timestamps, get_market_slug
+from .slot import get_market_slug, get_slot_timestamps
+
+__all__ = ["get_market_slug", "get_slot_timestamps"]

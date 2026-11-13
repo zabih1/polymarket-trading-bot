@@ -4,7 +4,8 @@ Polymarket Gamma API Client for market metadata and discovery.
 
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Any
+
 import requests
 
 try:
@@ -13,6 +14,7 @@ except (ImportError, ValueError):
     from src.config import GAMMA_API_URL
 
 logger = logging.getLogger(__name__)
+
 
 class GammaClient:
     """
@@ -25,7 +27,7 @@ class GammaClient:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "Mozilla/5.0"})
 
-    def fetch_market_metadata(self, slug: str, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+    def fetch_market_metadata(self, slug: str, timeout: float = 10.0) -> dict[str, Any] | None:
         """
         Fetches event and market metadata for a specific market slug.
         Returns parsed condition ID, UP token ID, DOWN token ID, and outcome details.
@@ -66,12 +68,15 @@ class GammaClient:
                 "event_id": event.get("id"),
                 "title": event.get("title"),
                 "condition_id": m.get("conditionId"),
+                "market_id": m.get("id"),
                 "up_token_id": up_id,
                 "down_token_id": down_id,
                 "outcomes": outcomes,
                 "outcome_prices": outcome_prices,
                 "active": event.get("active"),
                 "closed": event.get("closed"),
+                "neg_risk": bool(m.get("negRisk", event.get("negRisk", False))),
+                "fee_schedule": m.get("feeSchedule") or {},
             }
         except Exception as e:
             logger.error(f"Failed to fetch market metadata for {slug}: {e}")
