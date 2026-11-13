@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from src.collectors.clob_client import LocalOrderBook
+import asyncio
+
+import pytest
+
+from src.collectors.clob_client import (
+    LocalOrderBook,
+    _ClobHeartbeat,
+    _decode_clob_frame,
+)
 from src.collectors.oracle_client import OracleClient
 
 
@@ -44,3 +52,53 @@ def test_oracle_uses_milliseconds_and_ties_resolve_down() -> None:
     assert session.params["eventStartTime"] == "1700000000000"
     assert session.params["endDate"] == "1700000300000"
     assert result["winner"] == "DOWN"
+
+
+@pytest.mark.parametrize("raw", ["", " ", "not-json", b"\xff", "42", "[]"])
+def test_clob_decoder_ignores_non_event_frames(raw: str | bytes) -> None:
+    assert _decode_clob_frame(raw) == ([], None)
+
+
+def test_clob_decoder_separates_control_and_data_frames() -> None:
+    assert _decode_clob_frame("PONG") == ([], "PONG")
+    assert _decode_clob_frame(b"ping") == ([], "PING")
+    assert _decode_clob_frame('{"event_type":"book"}') == (
+        [{"event_type": "book"}],
+        None,
+    )
+    assert _decode_clob_frame('[{"event_type":"book"},null]') == (
+        [{"event_type": "book"}],
+        None,
+    )
+
+
+class _RecordingSocket:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> None:
+        self.messages.append(message)
+
+
+@pytest.mark.asyncio
+async def test_clob_heartbeat_sends_uppercase_ping() -> None:
+    socket = _RecordingSocket()
+    stop_event = asyncio.Event()
+    heartbeat = _ClobHeartbeat(interval_seconds=0.01, stale_seconds=1.0)
+    task = asyncio.create_task(heartbeat.run(socket, stop_event))
+
+    await asyncio.sleep(0.025)
+    stop_event.set()
+    await task
+
+    assert socket.messages
+    assert set(socket.messages) == {"PING"}
+
+
+@pytest.mark.asyncio
+async def test_clob_heartbeat_rejects_stale_connection() -> None:
+    socket = _RecordingSocket()
+    heartbeat = _ClobHeartbeat(interval_seconds=0.01, stale_seconds=0.001)
+
+    with pytest.raises(ConnectionError, match="timed out waiting for PONG"):
+        await heartbeat.run(socket, asyncio.Event())

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -17,6 +18,63 @@ except (ImportError, ValueError):
     from src.config import CLOB_REST_URL, CLOB_WS_URL
 
 logger = logging.getLogger(__name__)
+CLOB_HEARTBEAT_SECONDS = 10.0
+CLOB_STALE_SECONDS = 30.0
+
+
+def _decode_clob_frame(raw: str | bytes) -> tuple[list[dict[str, Any]], str | None]:
+    """Decode CLOB data while keeping application control frames separate."""
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return [], None
+
+    message = raw.strip()
+    control = message.upper()
+    if control in {"PING", "PONG"}:
+        return [], control
+    if not message:
+        return [], None
+
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        logger.debug("Ignoring non-JSON CLOB frame: %r", message[:200])
+        return [], None
+
+    if isinstance(payload, dict):
+        return [payload], None
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)], None
+    return [], None
+
+
+class _ClobHeartbeat:
+    """Track Polymarket's application-level CLOB PING/PONG heartbeat."""
+
+    def __init__(
+        self,
+        interval_seconds: float = CLOB_HEARTBEAT_SECONDS,
+        stale_seconds: float = CLOB_STALE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.interval_seconds = interval_seconds
+        self.stale_seconds = stale_seconds
+        self.clock = clock
+        self.last_pong = clock()
+
+    def record_pong(self) -> None:
+        self.last_pong = self.clock()
+
+    async def run(self, ws: Any, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self.interval_seconds)
+            except TimeoutError:
+                if self.clock() - self.last_pong > self.stale_seconds:
+                    raise ConnectionError("CLOB heartbeat timed out waiting for PONG") from None
+                await ws.send("PING")
 
 
 class LocalOrderBook:
@@ -149,7 +207,11 @@ class ClobClient:
         while not stop_event.is_set():
             try:
                 # ping_interval=None avoids client-side timeout mismatches with Polymarket server
-                async with websockets.connect(self.ws_url, ping_interval=None) as ws:
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=None,
+                    close_timeout=1.0,
+                ) as ws:
                     sub_msg = {
                         "type": "market",
                         "assets_ids": token_ids,
@@ -157,23 +219,40 @@ class ClobClient:
                     }
                     await ws.send(json.dumps(sub_msg))
                     logger.debug(f"Subscribed CLOB WS for tokens: {token_ids}")
+                    heartbeat = _ClobHeartbeat()
+                    heartbeat_task = asyncio.create_task(
+                        heartbeat.run(ws, stop_event), name="clob-market-heartbeat"
+                    )
+                    try:
+                        while not stop_event.is_set():
+                            if heartbeat_task.done():
+                                await heartbeat_task
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                            except TimeoutError:
+                                continue
 
-                    while not stop_event.is_set():
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                            data = json.loads(raw)
-                            if isinstance(data, list):
-                                for item in data:
-                                    self._route_event(item, up_book, down_book, up_token_id)
-                            elif isinstance(data, dict):
-                                self._route_event(data, up_book, down_book, up_token_id)
-                        except TimeoutError:
-                            continue
+                            events, control = _decode_clob_frame(raw)
+                            if control == "PONG":
+                                heartbeat.record_pong()
+                                continue
+                            if control == "PING":
+                                await ws.send("PONG")
+                                continue
+                            for event in events:
+                                self._route_event(event, up_book, down_book, up_token_id)
+                    finally:
+                        heartbeat_task.cancel()
+                        await asyncio.gather(heartbeat_task, return_exceptions=True)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 if stop_event.is_set():
                     break
+                # Never apply deltas to a pre-disconnect book. The server sends
+                # fresh snapshots for both token IDs after resubscription.
+                up_book.reset()
+                down_book.reset()
                 logger.warning(f"CLOB WS connection dropped ({e}), reconnecting in 2s...")
                 await asyncio.sleep(2.0)
 

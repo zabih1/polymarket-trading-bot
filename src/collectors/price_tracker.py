@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from collections.abc import Iterable
+from typing import Protocol
 
 import websockets
 
@@ -21,6 +22,56 @@ from ..config import (
 
 logger = logging.getLogger(__name__)
 SUPPORTED_FEEDS = frozenset({"polymarket", "binance", "coinbase"})
+POLYMARKET_HEARTBEAT_SECONDS = 5.0
+
+
+class _TextSender(Protocol):
+    async def send(self, message: str) -> object: ...
+
+
+def _decode_json_object(raw: str | bytes) -> dict[str, object] | None:
+    """Return a JSON object, ignoring WebSocket control and malformed frames."""
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+    message = raw.strip()
+    if not message or message.upper() in {"PING", "PONG"}:
+        return None
+
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        logger.debug("Ignoring non-JSON price-stream frame: %r", message[:200])
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _polymarket_value(message: dict[str, object], symbol: str) -> float | None:
+    """Extract the newest value for ``symbol`` from an RTDS update or snapshot."""
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("symbol", "")).lower() != symbol.lower():
+        return None
+
+    raw_value = payload.get("value")
+    if raw_value is None:
+        history = payload.get("data")
+        if not isinstance(history, list) or not history:
+            return None
+        latest = history[-1]
+        if not isinstance(latest, dict):
+            return None
+        raw_value = latest.get("value")
+
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 class PriceTracker:
@@ -186,7 +237,6 @@ class PriceTracker:
                 {
                     "topic": "crypto_prices_chainlink",
                     "type": "update",
-                    "filters": json.dumps({"symbol": market}),
                 }
             ],
         }
@@ -198,20 +248,39 @@ class PriceTracker:
                     ping_timeout=20,
                 ) as ws:
                     await ws.send(json.dumps(subscription))
-                    while not stop_event.is_set():
-                        try:
-                            payload = json.loads(await asyncio.wait_for(ws.recv(), 2.0))
-                        except TimeoutError:
-                            continue
-                        self._set(
-                            "polymarket",
-                            float((payload.get("payload") or {}).get("value", 0.0)),
-                        )
+                    heartbeat_task = asyncio.create_task(
+                        self._polymarket_heartbeat(ws, stop_event),
+                        name="polymarket-price-heartbeat",
+                    )
+                    try:
+                        while not stop_event.is_set():
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), 2.0)
+                            except TimeoutError:
+                                continue
+                            payload = _decode_json_object(raw)
+                            if payload is None:
+                                continue
+                            value = _polymarket_value(payload, market)
+                            if value is not None:
+                                self._set("polymarket", value)
+                    finally:
+                        heartbeat_task.cancel()
+                        await asyncio.gather(heartbeat_task, return_exceptions=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Polymarket price stream dropped: %s", exc)
                 await self._backoff(stop_event)
+
+    @staticmethod
+    async def _polymarket_heartbeat(ws: _TextSender, stop_event: asyncio.Event) -> None:
+        """Send the RTDS application heartbeat until shutdown or disconnection."""
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=POLYMARKET_HEARTBEAT_SECONDS)
+            except TimeoutError:
+                await ws.send("PING")
 
     @staticmethod
     async def _backoff(stop_event: asyncio.Event) -> None:
