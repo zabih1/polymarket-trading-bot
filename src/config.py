@@ -15,8 +15,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 DATA_DIR = PROJECT_ROOT / "data"
-RAW_DATA_DIR = DATA_DIR / "raw"
-PROCESSED_DATA_DIR = DATA_DIR / "processed"
+MARKET_DATA_DIR = DATA_DIR / "market_data"
+RAW_DATA_DIR = MARKET_DATA_DIR / "raw"
+PROCESSED_DATA_DIR = MARKET_DATA_DIR / "processed"
+BACKTEST_DIR = DATA_DIR / "backtests"
+BACKTEST_RESULTS_PATH = BACKTEST_DIR / "backtest_results.csv"
 
 # Public Polymarket endpoints.
 GAMMA_API_URL = "https://gamma-api.polymarket.com/events"

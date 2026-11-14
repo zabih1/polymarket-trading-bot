@@ -119,21 +119,19 @@ Collect twelve consecutive BTC five-minute markets:
 python run_collector.py --asset btc --window 5m --rounds 12
 ```
 
-Raw captures are written to `data/raw/`. The collector subscribes before each
-market opens and updates the capture after the completed result is available.
+Raw captures are partitioned by the market's UTC date under
+`data/market_data/raw/YYYYMMDD/`.
+For example, a market opening on November 14, 2026 UTC is stored in
+`data/market_data/raw/20261114/`. The collector subscribes before each market
+opens and updates the capture after the completed result is available.
 
 ### Data processing
 
-Validate raw captures and write enriched files to `data/processed/`:
+Validate raw captures and write enriched files to `data/market_data/processed/`.
+Date partitions from the raw directory are preserved automatically:
 
 ```powershell
 python run_pipeline.py
-```
-
-Custom directories can be supplied when processing external captures:
-
-```powershell
-python run_pipeline.py --raw-dir path/to/raw --output-dir path/to/processed
 ```
 
 ### Backtesting
@@ -141,8 +139,10 @@ python run_pipeline.py --raw-dir path/to/raw --output-dir path/to/processed
 Run the backtester over captured markets:
 
 ```powershell
-python run_backtest.py --data-dir data/raw --output data/backtest_results.csv
+python run_backtest.py
 ```
+
+Results are always written to `data/backtests/backtest_results.csv`.
 
 Use `--backfill-resolutions` to request authoritative historical open and close
 prices when a capture does not contain a completed result:
@@ -180,8 +180,10 @@ polymarket_trading_bot/
 |   `-- backtesting.py    # Event-ordered strategy replay
 |-- tests/                # Execution, market-data, and pipeline tests
 |-- data/
-|   |-- raw/              # Collected market snapshots
-|   `-- processed/        # Validated and enriched datasets
+|   |-- market_data/
+|   |   |-- raw/YYYYMMDD/       # Collected snapshots by UTC market date
+|   |   `-- processed/YYYYMMDD/ # Validated data with matching partitions
+|   `-- backtests/               # Backtest result files
 |-- run_engine.py
 |-- run_collector.py
 |-- run_pipeline.py

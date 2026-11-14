@@ -5,9 +5,9 @@ import json
 import pandas as pd
 import pytest
 
-from src.backtesting import run_late_entry
+from src.backtesting import backtest_directory, run_late_entry
 from src.engine.strategies.late_entry import check_entry_signal
-from src.research_pipeline import best_level_liquidity, validate_frame
+from src.research_pipeline import best_level_liquidity, process_directory, validate_frame
 
 
 def _frame(window: str = "5m", duration: int = 300) -> pd.DataFrame:
@@ -80,3 +80,35 @@ def test_complete_capture_runs_signal_fill_settlement_and_payout() -> None:
     assert result.shares_bought == 6.0
     assert result.payout == 6.0
     assert result.pnl == pytest.approx(0.6)
+
+
+def test_pipeline_preserves_daily_partitions(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    source_dir = raw_dir / "20270115"
+    source_dir.mkdir(parents=True)
+    frame = _frame()
+    source = source_dir / "btc-updown-5m-1800000000.csv"
+    frame.to_csv(source, index=False)
+
+    processed_dir = tmp_path / "processed"
+    report = process_directory(raw_dir, processed_dir)
+
+    relative = "20270115/btc-updown-5m-1800000000.csv"
+    assert report["processed"] == [relative]
+    assert (processed_dir / relative).exists()
+
+
+def test_backtester_discovers_daily_partitions(tmp_path) -> None:
+    source_dir = tmp_path / "20270115"
+    source_dir.mkdir()
+    frame = _frame()
+    frame["coinbase_current_price"] = frame["binance_current_price"] + 0.5
+    frame["chainlink_close_price"] = 160.0
+    frame["market_winner"] = "UP"
+    frame["market_completed"] = True
+    frame.to_csv(source_dir / "btc-updown-5m-1800000000.csv", index=False)
+
+    results = backtest_directory(tmp_path)
+
+    assert len(results) == 1
+    assert results.iloc[0]["status"] == "completed"

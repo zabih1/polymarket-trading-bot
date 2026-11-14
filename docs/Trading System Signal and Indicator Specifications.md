@@ -231,7 +231,7 @@ midpoint = (best_bid + best_ask) / 2.0
 
 ## 4. Processed Feature Dataset Schema
 
-Each processed dataset (saved in `data/processed/{market_slug}_features.csv` and `data/processed/all_features.csv`) contains the following standardized columns:
+Each processed dataset is saved under `data/market_data/processed/YYYYMMDD/` and contains the following standardized columns:
 
 ```
 Timestamp & Market IDs:

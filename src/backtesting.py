@@ -322,7 +322,7 @@ def backtest_directory(
     oracle = OracleClient() if backfill else None
     results: list[dict[str, Any]] = []
     try:
-        for path in sorted(data_dir.glob("*.csv")):
+        for path in sorted(data_dir.rglob("*.csv")):
             frame = pd.read_csv(path)
             if oracle is not None and validate_frame(frame).valid:
                 frame = backfill_resolution(frame, oracle)

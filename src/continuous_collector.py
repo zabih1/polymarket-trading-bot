@@ -12,7 +12,6 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -56,13 +55,12 @@ class ContinuousCollector:
         asset: str = DEFAULT_ASSET,
         window: str = DEFAULT_WINDOW,
         rounds: int = 0,
-        output_dir: Path = RAW_DATA_DIR,
     ):
         self.asset = asset.lower()
         self.window = window.lower()
         validate_market(self.asset, self.window)
         self.rounds = rounds  # 0 = infinite continuous
-        self.output_dir = Path(output_dir)
+        self.output_dir = RAW_DATA_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.interval = INTERVAL_SECONDS.get(self.window, 300)
 
@@ -370,13 +368,33 @@ class ContinuousCollector:
             return result
 
     def _save_slot_data(self, slug: str, records: list[dict[str, Any]]):
-        """Flushes recorded slot records to CSV on disk."""
+        """Flush recorded slot records into a UTC date partition."""
         if not records:
             logger.warning(f"No records collected for {slug}. Nothing saved.")
             return
 
         df = pd.DataFrame(records)
-        out_csv = self.output_dir / f"{slug}.csv"
+        slot_starts = (
+            pd.to_numeric(df["slot_start"], errors="coerce").dropna()
+            if "slot_start" in df
+            else pd.Series(dtype="float64")
+        )
+        if not slot_starts.empty:
+            slot_start = int(slot_starts.iloc[0])
+        else:
+            try:
+                slot_start = int(slug.rsplit("-", 1)[-1])
+            except ValueError:
+                slot_start = int(time.time())
+                logger.warning(
+                    "Could not determine slot date for %s; using the current UTC date",
+                    slug,
+                )
+
+        date_partition = datetime.fromtimestamp(slot_start, UTC).strftime("%Y%m%d")
+        daily_dir = self.output_dir / date_partition
+        daily_dir.mkdir(parents=True, exist_ok=True)
+        out_csv = daily_dir / f"{slug}.csv"
         df.to_csv(out_csv, index=False)
         logger.info(f" Saved {len(df)} snapshots to: {out_csv.resolve()}")
 
@@ -460,17 +478,12 @@ def parse_args():
         default=0,
         help="Number of slots to collect (default: 0 = unlimited continuous)",
     )
-    parser.add_argument(
-        "--output-dir", type=str, default=str(RAW_DATA_DIR), help="Output folder for raw CSV files"
-    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    collector = ContinuousCollector(
-        asset=args.asset, window=args.window, rounds=args.rounds, output_dir=Path(args.output_dir)
-    )
+    collector = ContinuousCollector(asset=args.asset, window=args.window, rounds=args.rounds)
 
     # Attach signal handlers for graceful exit
     loop = asyncio.new_event_loop()

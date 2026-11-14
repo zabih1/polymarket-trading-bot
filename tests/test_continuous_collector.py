@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -13,7 +14,8 @@ from src.continuous_collector import ContinuousCollector
 async def test_collect_slot_records_rows_while_feeds_are_unavailable(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    collector = ContinuousCollector(rounds=1, output_dir=tmp_path)
+    collector = ContinuousCollector(rounds=1)
+    collector.output_dir = tmp_path
 
     async def disconnected_books(*_args: Any, stop_event: asyncio.Event, **_kwargs: Any) -> None:
         await stop_event.wait()
@@ -41,7 +43,8 @@ async def test_collect_slot_records_rows_while_feeds_are_unavailable(
     assert records[0]["order_books_ready"] is False
     assert records[0]["price_feeds_ready"] is False
     assert records[0]["chainlink_price_to_beat"] == 100.0
-    assert (tmp_path / "btc-updown-5m-test.csv").exists()
+    date_partition = datetime.fromtimestamp(int(now), UTC).strftime("%Y%m%d")
+    assert (tmp_path / date_partition / "btc-updown-5m-test.csv").exists()
 
 
 class _ResolutionOracle:
@@ -69,7 +72,8 @@ async def test_resolution_polling_uses_bounded_retry(
     monkeypatch.setattr("src.continuous_collector.RESOLUTION_RETRY_INITIAL_SECONDS", 0.001)
     monkeypatch.setattr("src.continuous_collector.RESOLUTION_RETRY_MAX_SECONDS", 0.001)
     monkeypatch.setattr("src.continuous_collector.RESOLUTION_MAX_WAIT_SECONDS", 0.1)
-    collector = ContinuousCollector(rounds=1, output_dir=tmp_path)
+    collector = ContinuousCollector(rounds=1)
+    collector.output_dir = tmp_path
     oracle = _ResolutionOracle()
 
     try:
@@ -88,7 +92,8 @@ async def test_resolution_polling_uses_bounded_retry(
 async def test_next_slot_does_not_wait_for_previous_resolution(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    collector = ContinuousCollector(rounds=2, output_dir=tmp_path)
+    collector = ContinuousCollector(rounds=2)
+    collector.output_dir = tmp_path
     events: list[str] = []
     release_resolutions = asyncio.Event()
 

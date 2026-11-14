@@ -211,12 +211,15 @@ def enrich_frame(frame: pd.DataFrame) -> pd.DataFrame:
 def process_directory(raw_dir: Path, output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {"processed": [], "skipped": {}}
-    for source in sorted(raw_dir.glob("*.csv")):
+    for source in sorted(raw_dir.rglob("*.csv")):
+        relative_path = source.relative_to(raw_dir)
         frame = pd.read_csv(source)
         quality = validate_frame(frame)
         if not quality.valid:
-            report["skipped"][source.name] = list(quality.errors)
+            report["skipped"][relative_path.as_posix()] = list(quality.errors)
             continue
-        enrich_frame(frame).to_csv(output_dir / source.name, index=False)
-        report["processed"].append(source.name)
+        destination = output_dir / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        enrich_frame(frame).to_csv(destination, index=False)
+        report["processed"].append(relative_path.as_posix())
     return report
