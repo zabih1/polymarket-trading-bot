@@ -48,3 +48,6 @@ logs/
 
 # Runtime state
 state/*.json
+
+# Generated market datasets and backtest outputs
+data/**/*.csv
