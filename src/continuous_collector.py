@@ -251,9 +251,7 @@ class ContinuousCollector:
                 binance_p = self.price_tracker.binance_price
                 coinbase_p = self.price_tracker.coinbase_price
                 books_ready = up_book.is_ready and down_book.is_ready
-                feeds_ready = all(
-                    value is not None for value in (polymarket_p, binance_p, coinbase_p)
-                )
+                feeds_ready = self.price_tracker.strategy_ready
 
                 if books_ready and feeds_ready and not synchronization_logged:
                     logger.info("Order books and reference price feeds synchronized.")
@@ -271,6 +269,9 @@ class ContinuousCollector:
                     "binance_current_price": binance_p,
                     "coinbase_current_price": coinbase_p,
                     "price_feed_divergence": self.price_tracker.divergence,
+                    "price_feed_divergence_source": (
+                        "polymarket_chainlink_usd_vs_coinbase_usd"
+                    ),
                     "order_books_ready": books_ready,
                     "price_feeds_ready": feeds_ready,
                     "polymarket_feed_ready": polymarket_p is not None,

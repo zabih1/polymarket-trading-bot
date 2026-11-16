@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Protocol
 
 import websockets
@@ -22,6 +22,7 @@ from ..config import (
 
 logger = logging.getLogger(__name__)
 SUPPORTED_FEEDS = frozenset({"polymarket", "binance", "coinbase"})
+DIVERGENCE_FEEDS = ("polymarket", "coinbase")
 POLYMARKET_HEARTBEAT_SECONDS = 5.0
 
 
@@ -78,8 +79,10 @@ class PriceTracker:
     """Maintain synchronized prices from the feeds used by the strategy.
 
     ``price`` follows the reference engine's priority semantics. ``divergence``
-    is intentionally unavailable until both Binance and Coinbase have data;
-    callers must not silently convert a missing safety signal to zero.
+    compares Polymarket's Chainlink BTC/USD stream with Coinbase BTC-USD. Both
+    values are USD-denominated, unlike Binance BTCUSDT. The safety signal is
+    unavailable until both comparable feeds are fresh; callers must not
+    silently convert a missing value to zero.
     """
 
     def __init__(
@@ -142,24 +145,52 @@ class PriceTracker:
 
     @property
     def divergence(self) -> float | None:
-        binance = self.binance_price
+        polymarket = self.polymarket_price
         coinbase = self.coinbase_price
-        if binance is None or coinbase is None:
+        if polymarket is None or coinbase is None:
             return None
-        return abs(binance - coinbase)
+        return abs(polymarket - coinbase)
+
+    @property
+    def divergence_ready(self) -> bool:
+        """Whether both USD-denominated feeds required by late-entry are fresh."""
+        return all(self._fresh_value(feed) is not None for feed in DIVERGENCE_FEEDS)
 
     @property
     def is_ready(self) -> bool:
+        """Whether every configured feed currently has a fresh value."""
         return bool(self.feeds) and all(self._fresh_value(feed) is not None for feed in self.feeds)
+
+    @property
+    def strategy_ready(self) -> bool:
+        """Whether late-entry has a price and its comparable divergence feeds."""
+        # Binance remains an optional diagnostic feed and must not block the
+        # strategy when the two comparable USD feeds are available.
+        return self.price is not None and self.divergence_ready
 
     async def wait_for_ready(
         self,
         stop_event: asyncio.Event,
         timeout_seconds: float | None = None,
     ) -> bool:
+        return await self._wait_for_state(lambda: self.is_ready, stop_event, timeout_seconds)
+
+    async def wait_for_strategy_ready(
+        self,
+        stop_event: asyncio.Event,
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        return await self._wait_for_state(lambda: self.strategy_ready, stop_event, timeout_seconds)
+
+    @staticmethod
+    async def _wait_for_state(
+        predicate: Callable[[], bool],
+        stop_event: asyncio.Event,
+        timeout_seconds: float | None,
+    ) -> bool:
         started = time.monotonic()
         while not stop_event.is_set():
-            if self.is_ready:
+            if predicate():
                 return True
             if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
                 return False

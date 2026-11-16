@@ -72,7 +72,7 @@ defaults for paper trading.
 | --- | --- | --- |
 | `MARKET_ASSET` | `btc` | Asset used for market discovery. |
 | `MARKET_WINDOW` | `5m` | Market duration: `5m` or `15m`. |
-| `PRICE_FEEDS` | `polymarket,binance,coinbase` | Enabled public reference-price streams. |
+| `PRICE_FEEDS` | `polymarket,binance,coinbase` | Enabled public streams. Late-entry divergence requires Polymarket Chainlink and Coinbase; Binance is diagnostic. |
 | `PRICE_FEED_PRIORITY` | `polymarket,binance,coinbase` | Price source selection order. |
 | `MAX_PRICE_STALENESS_SECONDS` | `2.0` | Maximum age of a price before it is unavailable. |
 | `SIM_DELAY_MS` | `150` | Base simulated API placement delay. |
@@ -157,6 +157,8 @@ price-feed divergence or guess a market winner.
 ## Data Integrity and Execution Rules
 
 - Market slugs, slot boundaries, and expected durations must agree.
+- Price-feed divergence compares Polymarket Chainlink USD with Coinbase USD;
+  raw Binance BTCUSDT is not compared directly with USD feeds.
 - Liquidity is measured in USDC at the single best price level.
 - A simulated order fills only when its price crosses the book and best-level
   liquidity is strictly greater than twice the order notional.

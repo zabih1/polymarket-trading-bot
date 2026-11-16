@@ -46,8 +46,9 @@ def _csv_env(name: str, default: str) -> tuple[str, ...]:
     )
 
 
-# Late-entry needs Binance and Coinbase to calculate the reference divergence
-# guard. Polymarket remains the preferred directional feed.
+# Late-entry compares Polymarket's Chainlink USD feed with Coinbase BTC-USD.
+# Binance BTCUSDT is retained as an optional diagnostic feed, not as a raw
+# divergence input because USDT and USD are different quote currencies.
 DEFAULT_PRICE_FEEDS = _csv_env("PRICE_FEEDS", "polymarket,binance,coinbase")
 PRICE_FEED_PRIORITY = _csv_env("PRICE_FEED_PRIORITY", "polymarket,binance,coinbase,okx,bybit")
 MAX_PRICE_STALENESS_SECONDS = float(os.getenv("MAX_PRICE_STALENESS_SECONDS", "2.0"))

@@ -117,11 +117,13 @@ class TradingEngine:
         try:
             await self.client.init()
             self._restore_state()
-            ready = await self.ticker.wait_for_ready(ticker_stop, timeout_seconds=30.0)
+            ready = await self.ticker.wait_for_strategy_ready(
+                ticker_stop, timeout_seconds=30.0
+            )
             if not ready:
                 logger.warning(
-                    "Price feeds are not all ready; late-entry stays fail-closed "
-                    "until Binance and Coinbase are both current"
+                    "Required USD price feeds are not ready; late-entry stays fail-closed "
+                    "until Polymarket Chainlink and Coinbase are both current"
                 )
 
             while self.is_running:

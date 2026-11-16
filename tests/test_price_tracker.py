@@ -41,6 +41,26 @@ def test_polymarket_value_accepts_latest_history_value() -> None:
     assert _polymarket_value(message, "btc/usd") == 101.25
 
 
+def test_divergence_uses_comparable_polymarket_and_coinbase_usd_prices() -> None:
+    tracker = PriceTracker()
+    tracker._set("polymarket", 68_824.0)
+    tracker._set("coinbase", 68_826.0)
+    tracker._set("binance", 68_902.0)
+
+    assert tracker.divergence == 2.0
+    assert tracker.strategy_ready is True
+
+
+def test_binance_is_not_required_for_divergence_readiness() -> None:
+    tracker = PriceTracker()
+    tracker._set("polymarket", 68_824.0)
+    tracker._set("coinbase", 68_826.0)
+
+    assert tracker.binance_price is None
+    assert tracker.is_ready is False
+    assert tracker.strategy_ready is True
+
+
 class _RecordingSocket:
     def __init__(self) -> None:
         self.messages: list[str] = []

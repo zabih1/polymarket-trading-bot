@@ -69,6 +69,10 @@ def test_old_binance_only_capture_fails_closed_in_backtest() -> None:
 def test_complete_capture_runs_signal_fill_settlement_and_payout() -> None:
     frame = _frame()
     frame["coinbase_current_price"] = frame["binance_current_price"] + 0.5
+    frame["polymarket_current_price"] = frame["coinbase_current_price"] - 0.5
+    # Legacy captures may contain the old BTCUSDT-vs-USD divergence. The
+    # pipeline must recompute it from the comparable source columns.
+    frame["price_feed_divergence"] = 75.0
     frame["chainlink_close_price"] = 160.0
     frame["market_winner"] = "UP"
     frame["market_completed"] = True
@@ -103,6 +107,8 @@ def test_backtester_discovers_daily_partitions(tmp_path) -> None:
     source_dir.mkdir()
     frame = _frame()
     frame["coinbase_current_price"] = frame["binance_current_price"] + 0.5
+    frame["polymarket_current_price"] = frame["coinbase_current_price"] - 0.5
+    frame["price_feed_divergence"] = 75.0
     frame["chainlink_close_price"] = 160.0
     frame["market_winner"] = "UP"
     frame["market_completed"] = True

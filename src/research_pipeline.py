@@ -86,8 +86,13 @@ def validate_frame(frame: pd.DataFrame) -> DataQuality:
         )
         if missing_ask:
             warnings.append(f"{missing_ask} rows lack {side.upper()} best ask")
-    if not {"coinbase_current_price", "price_feed_divergence"} & set(frame.columns):
-        warnings.append("Coinbase/divergence data is absent; late-entry will fail closed")
+    divergence_columns = {"polymarket_current_price", "coinbase_current_price"}
+    missing_divergence_columns = sorted(divergence_columns - set(frame.columns))
+    if missing_divergence_columns:
+        warnings.append(
+            "USD divergence inputs are absent "
+            f"({', '.join(missing_divergence_columns)}); late-entry will fail closed"
+        )
     return DataQuality(not errors, tuple(errors), tuple(warnings))
 
 
@@ -130,13 +135,17 @@ def selected_asset_price(row: pd.Series) -> float | None:
 
 
 def feed_divergence(row: pd.Series) -> float | None:
-    value = row.get("price_feed_divergence")
-    if pd.notna(value):
-        return float(value)
-    binance = row.get("binance_current_price")
+    """Compare the two USD-denominated feeds used by the live strategy.
+
+    Captured ``price_feed_divergence`` values are deliberately ignored here.
+    Older captures calculated that field from BTCUSDT and BTC-USD, which are
+    not directly comparable. Recomputing from source columns keeps historical
+    backtests consistent with the current live implementation.
+    """
+    polymarket = row.get("polymarket_current_price")
     coinbase = row.get("coinbase_current_price")
-    if pd.notna(binance) and pd.notna(coinbase):
-        return abs(float(binance) - float(coinbase))
+    if pd.notna(polymarket) and pd.notna(coinbase):
+        return abs(float(polymarket) - float(coinbase))
     return None
 
 
@@ -157,7 +166,7 @@ def enrich_frame(frame: pd.DataFrame) -> pd.DataFrame:
     rtv = RTV(30)
     peak_abs_gap = 0.0
     last_second: int | None = None
-    rows: list[dict[str, float | None]] = []
+    rows: list[dict[str, float | str | None]] = []
 
     for _, row in data.iterrows():
         timestamp = row["current_time"].timestamp()
@@ -179,6 +188,7 @@ def enrich_frame(frame: pd.DataFrame) -> pd.DataFrame:
                 atr.update(asset_price)
                 rtv.update(asset_price)
 
+        divergence = feed_divergence(row)
         rows.append(
             {
                 "elapsed_seconds": timestamp - start,
@@ -194,7 +204,12 @@ def enrich_frame(frame: pd.DataFrame) -> pd.DataFrame:
                 "peak_gap_ratio": (
                     abs(gap) / peak_abs_gap if gap is not None and peak_abs_gap > 0 else None
                 ),
-                "price_feed_divergence": feed_divergence(row),
+                "price_feed_divergence": divergence,
+                "price_feed_divergence_source": (
+                    "polymarket_chainlink_usd_vs_coinbase_usd"
+                    if divergence is not None
+                    else None
+                ),
                 "polymarket_up_best_bid_liquidity": best_level_liquidity(row, "up", "bid"),
                 "polymarket_up_best_ask_liquidity": best_level_liquidity(row, "up", "ask"),
                 "polymarket_down_best_bid_liquidity": best_level_liquidity(row, "down", "bid"),

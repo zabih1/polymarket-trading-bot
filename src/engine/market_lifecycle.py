@@ -148,7 +148,7 @@ class MarketLifecycle:
             return
         if not (self.up_book.is_ready and self.down_book.is_ready):
             return
-        if self.strategy_name == "late-entry" and not self.price_tracker.is_ready:
+        if self.strategy_name == "late-entry" and not self.price_tracker.strategy_ready:
             return
         if self.price_tracker.price is None:
             return
